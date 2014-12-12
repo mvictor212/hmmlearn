@@ -12,7 +12,7 @@ The :mod:`hmmlearn.hmm` module implements hidden Markov models.
 import string
 
 import numpy as np
-from numpy.random import multivariate_normal
+from numpy.random import multivariate_normal, normal
 
 from sklearn.utils import check_random_state
 from sklearn.utils.extmath import logsumexp
@@ -746,7 +746,7 @@ class GaussianHMM(_BaseHMM):
 
     def __init__(self, n_states=1, covariance_type='diag', startprob=None,
                  transmat=None, startprob_prior=None, transmat_prior=None,
-                 algorithm="viterbi", means_prior=None, means_weight=0,
+                 algorithm="viterbi", means_var=1.0,
                  covars_prior=1e-2, covars_weight=1,
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
@@ -763,8 +763,7 @@ class GaussianHMM(_BaseHMM):
         if not covariance_type in ['spherical', 'tied', 'diag', 'full']:
             raise ValueError('bad covariance_type')
 
-        self.means_prior = means_prior
-        self.means_weight = means_weight
+        self.means_var = means_var
 
         self.covars_prior = covars_prior
         self.covars_weight = covars_weight
@@ -832,12 +831,17 @@ class GaussianHMM(_BaseHMM):
                                               self.n_features))
 
         self.n_features = obs[0].shape[1]
+        concat_obs = np.vstack(obs)
 
         if 'm' in params:
-            self._means_ = cluster.KMeans(
-                n_clusters=self.n_states).fit(obs[0]).cluster_centers_
+            clu = cluster.KMeans(n_clusters=self.n_states).fit(
+                concat_obs)
+            self._means_ = np.array([multivariate_normal(
+                mean,
+                np.eye(self.n_features) * self.means_var)
+                for mean in clu.cluster_centers_])
         if 'c' in params:
-            cv = np.cov(obs[0].T)
+            cv = np.cov(concat_obs.T)
             if not cv.shape:
                 cv.shape = (1, 1)
             self._covars_ = distribute_covar_matrix_to_match_covariance_type(
@@ -881,12 +885,7 @@ class GaussianHMM(_BaseHMM):
         # p. 443 - 445
         denom = stats['post'][:, np.newaxis]
         if 'm' in params:
-            prior = self.means_prior
-            weight = self.means_weight
-            if prior is None:
-                weight = 0
-                prior = 0
-            self._means_ = (weight * prior + stats['obs']) / (weight + denom)
+            self._means_ = stats['obs'] / stats['post'][:, np.newaxis]
 
         if 'c' in params:
             covars_prior = self.covars_prior
@@ -895,15 +894,8 @@ class GaussianHMM(_BaseHMM):
                 covars_weight = 0
                 covars_prior = 0
 
-            means_prior = self.means_prior
-            means_weight = self.means_weight
-            if means_prior is None:
-                means_weight = 0
-                means_prior = 0
-            meandiff = self._means_ - means_prior
-
             if self._covariance_type in ('spherical', 'diag'):
-                cv_num = (means_weight * (meandiff) ** 2
+                cv_num = ((self._means_) ** 2
                           + stats['obs**2']
                           - 2 * self._means_ * stats['obs']
                           + self._means_ ** 2 * denom)
@@ -920,8 +912,8 @@ class GaussianHMM(_BaseHMM):
                 for c in range(self.n_states):
                     obsmean = np.outer(stats['obs'][c], self._means_[c])
 
-                    cvnum[c] = (means_weight * np.outer(meandiff[c],
-                                                        meandiff[c])
+                    cvnum[c] = (np.outer(self._means_[c],
+                                                        self._means_[c])
                                 + stats['obs*obs.T'][c]
                                 - obsmean - obsmean.T
                                 + np.outer(self._means_[c], self._means_[c])
@@ -1157,8 +1149,9 @@ class MultinomialHMM(_BaseHMM):
             has shape (n_i, n_features), where n_i is the length of
             the i_th observation.
         """
-        err_msg = ("Input must be both positive integer array and "
-                   "every element must be continuous, but %s was given.")
+        err_msg = ("Input must be a list of non-negative integer arrays where "
+                   "in all, every element must be continuous, but %s was "
+                   "given.")
 
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
@@ -1224,7 +1217,7 @@ class PoissonHMM(_BaseHMM):
 
     def __init__(self, n_states=1, startprob=None, transmat=None,
                  startprob_prior=None, transmat_prior=None,
-                 rates_prior=None, rates_weight=None, algorithm="viterbi",
+                 rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters, verbose=0):
@@ -1244,8 +1237,7 @@ class PoissonHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params, verbose=verbose)
-        self.rates_prior = rates_prior
-        self.rates_weight = rates_weight
+        self.rates_var = rates_var
 
     def _get_rates(self):
         """Emission rate for each state."""
@@ -1268,11 +1260,11 @@ class PoissonHMM(_BaseHMM):
 
         concat_obs = np.concatenate(obs)
         if 'r' in params:
-            self._rates = (cluster.KMeans(
-                n_clusters=self.n_states).fit(
-                np.atleast_2d(concat_obs).T).cluster_centers_.T[0]
-                + np.random.choice(concat_obs, size=self.n_states,
-                                   replace=False)) / 2.
+            clu = cluster.KMeans(n_clusters=self.n_states).fit(
+                np.atleast_2d(concat_obs).T)
+            rates = normal(0, self.rates_var, self.n_states) + \
+                clu.cluster_centers_.T[0]
+            self._rates = np.maximum(0.1, rates)
 
     def _initialize_sufficient_statistics(self):
         stats = super(PoissonHMM, self)._initialize_sufficient_statistics()
@@ -1294,14 +1286,30 @@ class PoissonHMM(_BaseHMM):
     def _do_mstep(self, stats, params):
         super(PoissonHMM, self)._do_mstep(stats, params)
 
-        denom = stats['post']
         if 'r' in params:
-            prior = self.rates_prior
-            weight = self.rates_weight
-            if prior is None:
-                weight = 0
-                prior = 0
-            self._rates = (weight * prior + stats['obs']) / (weight + denom)
+            self._rates = stats['obs'] / stats['post']
+
+    def _check_input_symbols(self, obs):
+        """check if input can be used for PoissonHMM. Input must be a list
+        of non-negative integers.
+        e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, -1, 3, 5, 10] not
+        """
+        symbols = reduce(lambda x, y: np.concatenate([x, y]),
+                         obs)
+
+        if symbols.dtype.kind != 'i':
+            # input symbols must be integer
+            return False
+
+        if len(symbols) == 1:
+            # input too short
+            return False
+
+        if np.any(symbols < 0):
+            # input contains negative intiger
+            return False
+
+        return True
 
     def fit(self, obs):
         """Estimate model parameters.
@@ -1325,6 +1333,12 @@ class PoissonHMM(_BaseHMM):
         more components becomminging too small).  You can fix this by getting
         more training data, or increasing covars_prior.
         """
+        err_msg = ("Input must be a list of non-negative integer arrays, \
+                   but %s was given.")
+
+        if not self._check_input_symbols(obs):
+            raise ValueError(err_msg % obs)
+
         return super(PoissonHMM, self).fit(obs)
 
 
@@ -1386,7 +1400,7 @@ class ExponentialHMM(_BaseHMM):
 
     def __init__(self, n_states=1, startprob=None, transmat=None,
                  startprob_prior=None, transmat_prior=None,
-                 rates_prior=None, rates_weight=None, algorithm="viterbi",
+                 rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters, verbose=0):
@@ -1406,8 +1420,7 @@ class ExponentialHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params, verbose=verbose)
-        self.rates_prior = rates_prior
-        self.rates_weight = rates_weight
+        self.rates_var = rates_var
 
     def _get_rates(self):
         """Emission rate for each state."""
@@ -1430,11 +1443,11 @@ class ExponentialHMM(_BaseHMM):
 
         concat_obs = np.concatenate(obs)
         if 'r' in params:
-            self._rates = 2 / (cluster.KMeans(
-                n_clusters=self.n_states).fit(
-                np.atleast_2d(concat_obs).T).cluster_centers_.T[0]
-                + np.random.choice(concat_obs, size=self.n_states,
-                                   replace=False))
+            clu = cluster.KMeans(n_clusters=self.n_states).fit(
+                np.atleast_2d(concat_obs).T)
+            rates = normal(0, self.rates_var, self.n_states) + \
+                1. / clu.cluster_centers_.T[0]
+            self._rates = np.maximum(0.1, rates)
 
     def _initialize_sufficient_statistics(self):
         stats = super(ExponentialHMM, self)._initialize_sufficient_statistics()
@@ -1456,14 +1469,30 @@ class ExponentialHMM(_BaseHMM):
     def _do_mstep(self, stats, params):
         super(ExponentialHMM, self)._do_mstep(stats, params)
 
-        numer = stats['post']
         if 'r' in params:
-            prior = self.rates_prior
-            weight = self.rates_weight
-            if prior is None:
-                weight = 0
-                prior = 0
-            self._rates = (weight + numer) / (weight * prior + stats['obs'])
+            self._rates = stats['post'] / stats['obs']
+
+    def _check_input_symbols(self, obs):
+        """check if input can be used for ExponentialHMM. Input must be a list
+        of non-negative reals.
+        e.g. x = [0., 0.5, 2.3] is OK and y = [0.0, -1.0, 3.3, 5.4, 10.9] not
+        """
+        symbols = reduce(lambda x, y: np.concatenate([x, y]),
+                         obs)
+
+        if symbols.dtype.kind not in ('f', 'i'):
+            # input symbols must be real
+            return False
+
+        if len(symbols) == 1:
+            # input too short
+            return False
+
+        if np.any(symbols < 0):
+            # input contains negative intiger
+            return False
+
+        return True
 
     def fit(self, obs):
         """Estimate model parameters.
@@ -1487,6 +1516,12 @@ class ExponentialHMM(_BaseHMM):
         more components becomminging too small).  You can fix this by getting
         more training data, or increasing covars_prior.
         """
+        err_msg = ("Input must be a list of non-negative real arrays, \
+                   but %s was given.")
+
+        if not self._check_input_symbols(obs):
+            raise ValueError(err_msg % obs)
+
         return super(ExponentialHMM, self).fit(obs)
 
 
@@ -1556,8 +1591,7 @@ class GMMHMM(_BaseHMM):
                  covars_prior=1e-2, random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0,
-                 var=1.0):
+                 verbose=0, means_var=1.0):
         """Create a hidden Markov model with GMM emissions.
 
         Parameters
@@ -1591,7 +1625,7 @@ class GMMHMM(_BaseHMM):
                     g = GMM(n_mix, covariance_type=covariance_type)
                 gmms.append(g)
         self.gmms_ = gmms
-        self.var = var
+        self.means_var = means_var
 
     # Read-only properties.
     @property
@@ -1617,9 +1651,11 @@ class GMMHMM(_BaseHMM):
         for g in self.gmms_:
             g.set_params(init_params=params, n_iter=0)
             g.fit(allobs)
-            g.means_ += multivariate_normal(np.zeros(n_features),
-                                            np.eye(n_features) * self.var,
-                                            self.n_mix)
+            means = np.array([multivariate_normal(
+                mean,
+                np.eye(n_features) * self.means_var)
+                for mean in g.means_])
+            g.means_ = means
 
     def _initialize_sufficient_statistics(self):
         stats = super(GMMHMM, self)._initialize_sufficient_statistics()
@@ -1639,8 +1675,8 @@ class GMMHMM(_BaseHMM):
             _, tmp_gmm_posteriors = g.score_samples(obs)
             lgmm_posteriors = np.log(tmp_gmm_posteriors
                                      + np.finfo(np.float).eps) + \
-                    np.log(posteriors[:, state][:, np.newaxis]
-                           + np.finfo(np.float).eps)
+                np.log(posteriors[:, state][:, np.newaxis]
+                       + np.finfo(np.float).eps)
             gmm_posteriors = np.exp(lgmm_posteriors)
             tmp_gmm = GMM(g.n_states, covariance_type=g.covariance_type)
             n_features = g.means_.shape[1]

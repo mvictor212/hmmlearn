@@ -16,7 +16,7 @@ from sklearn.utils import check_random_state
 from sklearn.utils.extmath import logsumexp
 from sklearn.base import BaseEstimator
 
-from .hmm import (GaussianHMM, MultinomialHMM, GMMHMM,
+from .hmm import (GaussianHMM, MultinomialHMM,
                   PoissonHMM, ExponentialHMM, VerboseReporter,
                   randomize, normalize, log_normalize)
 
@@ -505,13 +505,13 @@ class MultinomialMixHMM(_BaseMixHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0):
+                 verbose=0, emissionprob_prior=None):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
         ----------
         n_components : int
-            Number of states.
+            Number of HMM components.
         """
         _BaseMixHMM.__init__(self, n_components, n_states,
                              hmms=hmms,
@@ -522,14 +522,17 @@ class MultinomialMixHMM(_BaseMixHMM):
                              params=params,
                              init_params=init_params,
                              verbose=verbose)
+        self.emissionprob_prior = emissionprob_prior
 
     def _init(self, obs, params='ph'):
         super(MultinomialMixHMM, self)._init(obs, params=params)
         self.random_state = check_random_state(self.random_state)
 
-        if 'h' in params:
-            self.hmms = [MultinomialHMM(self.n_states)
-                         for _ in range(self.n_components)]
+        if ('h' in params) and (self.hmms is None):
+            self.hmms = [MultinomialHMM(
+                self.n_states,
+                emissionprob_prior=self.emissionprob_prior)
+                for _ in range(self.n_components)]
             for hmm in self.hmms:
                 hmm._init(obs)
 
@@ -602,10 +605,507 @@ class MultinomialMixHMM(_BaseMixHMM):
             has shape (n_i, n_features), where n_i is the length of
             the i_th observation.
         """
-        err_msg = ("Input must be both positive integer array and "
-                   "every element must be continuous, but %s was given.")
+        err_msg = ("Input must be a list of non-negative integer arrays where "
+                   "in all, every element must be continuous, but %s was "
+                   "given.")
 
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
+        return _BaseMixHMM.fit(self, obs, **kwargs)
+
+
+class PoissonMixHMM(_BaseMixHMM):
+    """Mixture of Hidden Markov Models with Poisson (discrete) emissions
+
+    Attributes
+    ----------
+    n_components : int
+        Number of HMMs in the model.
+
+    n_states : int
+        Number of states in each HMM
+
+    transmat : array, shape (`n_components`, `n_components`)
+        Matrix of transition probabilities between states.
+
+    startprob : array, shape ('n_components`,)
+        Initial state occupation distribution.
+
+    emissionprob : array, shape ('n_components`, 'n_symbols`)
+        Probability of emitting a given symbol when in each state.
+
+    random_state: RandomState or an int seed (0 by default)
+        A random number generator instance
+
+    n_iter : int, optional
+        Number of iterations to perform.
+
+    thresh : float, optional
+        Convergence threshold.
+
+    params : string, optional
+        Controls which parameters are updated in the training
+        process.  Can contain any combination of 's' for startprob,
+        't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    init_params : string, optional
+        Controls which parameters are initialized prior to
+        training.  Can contain any combination of 's' for
+        startprob, 't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    verbose : int, default: 0
+        Enable verbose output. If 1 then it prints progress and performance
+        once in a while (the more iterations the lower the frequency). If
+        greater than 1 then it prints progress and performance for every
+        iteration.
+
+    Examples
+    --------
+    >>> from hmmlearn.mixhmm import PoissonMixHMM
+    >>> PoissonMixHMM(n_components=2, n_states=3)
+    ...                             #doctest: +ELLIPSIS +NORMALIZE_WHITESPACE
+    PoissonMixHMM(...
+
+    See Also
+    --------
+    GaussianHMM : HMM with Gaussian emissions
+    """
+
+    def __init__(self, n_components=1, n_states=1,
+                 hmms=None, component_weights=None,
+                 random_state=None, n_iter=10, thresh=1e-2,
+                 params=string.ascii_letters,
+                 init_params=string.ascii_letters,
+                 verbose=0, rates_var=1.0):
+        """Create a hidden Markov model with multinomial emissions.
+
+        Parameters
+        ----------
+        n_components : int
+            Number of HMM components.
+        """
+        _BaseMixHMM.__init__(self, n_components, n_states,
+                             hmms=hmms,
+                             component_weights=component_weights,
+                             random_state=random_state,
+                             n_iter=n_iter,
+                             thresh=thresh,
+                             params=params,
+                             init_params=init_params,
+                             verbose=verbose)
+        self.rates_var = rates_var
+
+    def _init(self, obs, params='ph'):
+        super(PoissonMixHMM, self)._init(obs, params=params)
+        self.random_state = check_random_state(self.random_state)
+
+        if ('h' in params) and (self.hmms is None):
+            self.hmms = [PoissonHMM(self.n_states, rates_var=self.rates_var)
+                         for _ in range(self.n_components)]
+            for hmm in self.hmms:
+                hmm._init(obs)
+
+    def _initialize_inner_sufficient_statistics(self):
+        stats = super(PoissonMixHMM,
+                      self)._initialize_inner_sufficient_statistics()
+        stats['post'] = [np.zeros(hmm.n_states) for hmm in self.hmms]
+        stats['obs'] = [np.zeros((hmm.n_states,)) for hmm in self.hmms]
+        return stats
+
+    def _accumulate_inner_sufficient_statistics(self, stats, obs, framelogprob,
+                                                posteriors, fwdlattice,
+                                                bwdlattice, params,
+                                                k, currlogprob):
+        super(PoissonMixHMM, self)._accumulate_inner_sufficient_statistics(
+            stats, obs, framelogprob, posteriors, fwdlattice, bwdlattice,
+            params, k, currlogprob)
+        if 'h' in params:
+            stats['post'][k] += posteriors.sum(axis=0)
+            stats['obs'][k] += np.dot(posteriors.T, obs)
+
+    def _accumulate_sufficient_statistics(self, stats, inner_stats, params):
+        super(PoissonMixHMM, self)._accumulate_sufficient_statistics(
+            stats, inner_stats, params)
+        component_weights = log_normalize(inner_stats['component_weights'], 0)
+        if 'h' in params:
+            for k in range(self.n_components):
+                stats['hmm_stats'][k]['post'] += component_weights[k] * \
+                    inner_stats['post'][k]
+                stats['hmm_stats'][k]['obs'] += component_weights[k] * \
+                    inner_stats['obs'][k]
+
+    def _check_input_symbols(self, obs):
+        """check if input can be used for PoissonMixHMM. Input must be a list
+        of non-negative integers.
+        e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, -1, 3, 5, 10] not
+        """
+        symbols = reduce(lambda x, y: np.concatenate([x, y]),
+                         obs)
+
+        if symbols.dtype.kind != 'i':
+            # input symbols must be integer
+            return False
+
+        if len(symbols) == 1:
+            # input too short
+            return False
+
+        if np.any(symbols < 0):
+            # input contains negative intiger
+            return False
+
+        return True
+
+    def fit(self, obs, **kwargs):
+        """Estimate model parameters.
+
+        An initialization step is performed before entering the EM
+        algorithm. If you want to avoid this step, pass proper
+        ``init_params`` keyword argument to estimator's constructor.
+
+        Parameters
+        ----------
+        obs : list
+            List of array-like observation sequences, each of which
+            has shape (n_i, n_features), where n_i is the length of
+            the i_th observation.
+        """
+        err_msg = ("Input must be a list of non-negative integer arrays, \
+                   but %s was given.")
+
+        if not self._check_input_symbols(obs):
+            raise ValueError(err_msg % obs)
+
+        return _BaseMixHMM.fit(self, obs, **kwargs)
+
+
+class ExponentialMixHMM(_BaseMixHMM):
+    """Mixture of Hidden Markov Models with Exponential emissions
+
+    Attributes
+    ----------
+    n_components : int
+        Number of HMMs in the model.
+
+    n_states : int
+        Number of states in each HMM
+
+    transmat : array, shape (`n_components`, `n_components`)
+        Matrix of transition probabilities between states.
+
+    startprob : array, shape ('n_components`,)
+        Initial state occupation distribution.
+
+    emissionprob : array, shape ('n_components`, 'n_symbols`)
+        Probability of emitting a given symbol when in each state.
+
+    random_state: RandomState or an int seed (0 by default)
+        A random number generator instance
+
+    n_iter : int, optional
+        Number of iterations to perform.
+
+    thresh : float, optional
+        Convergence threshold.
+
+    params : string, optional
+        Controls which parameters are updated in the training
+        process.  Can contain any combination of 's' for startprob,
+        't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    init_params : string, optional
+        Controls which parameters are initialized prior to
+        training.  Can contain any combination of 's' for
+        startprob, 't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    verbose : int, default: 0
+        Enable verbose output. If 1 then it prints progress and performance
+        once in a while (the more iterations the lower the frequency). If
+        greater than 1 then it prints progress and performance for every
+        iteration.
+
+    Examples
+    --------
+    >>> from hmmlearn.mixhmm import ExponentialMixHMM
+    >>> ExponentialMixHMM(n_components=2, n_states=3)
+    ...                             #doctest: +ELLIPSIS +NORMALIZE_WHITESPACE
+    ExponentialMixHMM(...
+
+    See Also
+    --------
+    GaussianHMM : HMM with Gaussian emissions
+    """
+
+    def __init__(self, n_components=1, n_states=1,
+                 hmms=None, component_weights=None,
+                 random_state=None, n_iter=10, thresh=1e-2,
+                 params=string.ascii_letters,
+                 init_params=string.ascii_letters,
+                 verbose=0, rates_var=1.0):
+        """Create a hidden Markov model with multinomial emissions.
+
+        Parameters
+        ----------
+        n_components : int
+            Number of HMM components.
+        """
+        _BaseMixHMM.__init__(self, n_components, n_states,
+                             hmms=hmms,
+                             component_weights=component_weights,
+                             random_state=random_state,
+                             n_iter=n_iter,
+                             thresh=thresh,
+                             params=params,
+                             init_params=init_params,
+                             verbose=verbose)
+        self.rates_var = rates_var
+
+    def _init(self, obs, params='ph'):
+        super(ExponentialMixHMM, self)._init(obs, params=params)
+        self.random_state = check_random_state(self.random_state)
+
+        if ('h' in params) and (self.hmms is None):
+            self.hmms = [ExponentialHMM(self.n_states,
+                                        rates_var=self.rates_var)
+                         for _ in range(self.n_components)]
+            for hmm in self.hmms:
+                hmm._init(obs)
+
+    def _initialize_inner_sufficient_statistics(self):
+        stats = super(ExponentialMixHMM,
+                      self)._initialize_inner_sufficient_statistics()
+        stats['post'] = [np.zeros(hmm.n_states) for hmm in self.hmms]
+        stats['obs'] = [np.zeros((hmm.n_states,)) for hmm in self.hmms]
+        return stats
+
+    def _accumulate_inner_sufficient_statistics(self, stats, obs, framelogprob,
+                                                posteriors, fwdlattice,
+                                                bwdlattice, params,
+                                                k, currlogprob):
+        super(ExponentialMixHMM, self)._accumulate_inner_sufficient_statistics(
+            stats, obs, framelogprob, posteriors, fwdlattice, bwdlattice,
+            params, k, currlogprob)
+        if 'h' in params:
+            stats['post'][k] += posteriors.sum(axis=0)
+            stats['obs'][k] += np.dot(posteriors.T, obs)
+
+    def _accumulate_sufficient_statistics(self, stats, inner_stats, params):
+        super(ExponentialMixHMM, self)._accumulate_sufficient_statistics(
+            stats, inner_stats, params)
+        component_weights = log_normalize(inner_stats['component_weights'], 0)
+        if 'h' in params:
+            for k in range(self.n_components):
+                stats['hmm_stats'][k]['post'] += component_weights[k] * \
+                    inner_stats['post'][k]
+                stats['hmm_stats'][k]['obs'] += component_weights[k] * \
+                    inner_stats['obs'][k]
+
+    def _check_input_symbols(self, obs):
+        """check if input can be used for ExponentialHMM. Input must be a list
+        of non-negative reals.
+        e.g. x = [0., 0.5, 2.3] is OK and y = [0.0, -1.0, 3.3, 5.4, 10.9] not
+        """
+        symbols = reduce(lambda x, y: np.concatenate([x, y]),
+                         obs)
+
+        if symbols.dtype.kind not in ('f', 'i'):
+            # input symbols must be real
+            return False
+
+        if len(symbols) == 1:
+            # input too short
+            return False
+
+        if np.any(symbols < 0):
+            # input contains negative intiger
+            return False
+
+        return True
+
+    def fit(self, obs, **kwargs):
+        """Estimate model parameters.
+
+        An initialization step is performed before entering the EM
+        algorithm. If you want to avoid this step, pass proper
+        ``init_params`` keyword argument to estimator's constructor.
+
+        Parameters
+        ----------
+        obs : list
+            List of array-like observation sequences, each of which
+            has shape (n_i, n_features), where n_i is the length of
+            the i_th observation.
+        """
+        err_msg = ("Input must be a list of non-negative real arrays, \
+                   but %s was given.")
+
+        if not self._check_input_symbols(obs):
+            raise ValueError(err_msg % obs)
+
+        return _BaseMixHMM.fit(self, obs, **kwargs)
+
+
+class GaussianMixHMM(_BaseMixHMM):
+    """Mixture of Hidden Markov Models with Gaussian emissions
+
+    Attributes
+    ----------
+    n_components : int
+        Number of HMMs in the model.
+
+    n_states : int
+        Number of states in each HMM
+
+    n_features : int
+        Dimensionality of the Gaussian emissions.
+
+    transmat : array, shape (`n_components`, `n_components`)
+        Matrix of transition probabilities between states.
+
+    startprob : array, shape ('n_components`,)
+        Initial state occupation distribution.
+
+    emissionprob : array, shape ('n_components`, 'n_symbols`)
+        Probability of emitting a given symbol when in each state.
+
+    random_state: RandomState or an int seed (0 by default)
+        A random number generator instance
+
+    n_iter : int, optional
+        Number of iterations to perform.
+
+    thresh : float, optional
+        Convergence threshold.
+
+    params : string, optional
+        Controls which parameters are updated in the training
+        process.  Can contain any combination of 's' for startprob,
+        't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    init_params : string, optional
+        Controls which parameters are initialized prior to
+        training.  Can contain any combination of 's' for
+        startprob, 't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    verbose : int, default: 0
+        Enable verbose output. If 1 then it prints progress and performance
+        once in a while (the more iterations the lower the frequency). If
+        greater than 1 then it prints progress and performance for every
+        iteration.
+
+    Examples
+    --------
+    >>> from hmmlearn.mixhmm import ExponentialMixHMM
+    >>> ExponentialMixHMM(n_components=2, n_states=3)
+    ...                             #doctest: +ELLIPSIS +NORMALIZE_WHITESPACE
+    ExponentialMixHMM(...
+
+    See Also
+    --------
+    GaussianHMM : HMM with Gaussian emissions
+    """
+
+    def __init__(self, n_components=1, n_states=1, n_features=1,
+                 hmms=None, component_weights=None,
+                 random_state=None, n_iter=10, thresh=1e-2,
+                 params=string.ascii_letters,
+                 init_params=string.ascii_letters,
+                 verbose=0, means_var=1.0):
+        """Create a hidden Markov model with multinomial emissions.
+
+        Parameters
+        ----------
+        n_components : int
+            Number of HMM components.
+        """
+        _BaseMixHMM.__init__(self, n_components, n_states,
+                             hmms=hmms,
+                             component_weights=component_weights,
+                             random_state=random_state,
+                             n_iter=n_iter,
+                             thresh=thresh,
+                             params=params,
+                             init_params=init_params,
+                             verbose=verbose)
+        self.means_var = means_var
+
+    def _init(self, obs, params='ph'):
+        super(GaussianMixHMM, self)._init(obs, params=params)
+        self.random_state = check_random_state(self.random_state)
+
+        if ('h' in params) and (self.hmms is None):
+            self.hmms = [GaussianHMM(self.n_states, means_var=self.means_var)
+                         for _ in range(self.n_components)]
+            for hmm in self.hmms:
+                hmm._init(obs)
+
+    def _initialize_inner_sufficient_statistics(self):
+        stats = super(GaussianMixHMM,
+                      self)._initialize_inner_sufficient_statistics()
+        stats['post'] = [np.zeros(hmm.n_states) for hmm in self.hmms]
+        stats['obs'] = [np.zeros((hmm.n_states, hmm.n_features))
+                        for hmm in self.hmms]
+        stats['obs**2'] = [np.zeros((hmm.n_states, hmm.n_features))
+                           for hmm in self.hmms]
+        stats['obs*obs.T'] = [np.zeros((hmm.n_states, hmm.n_features,
+                                        hmm.n_features))
+                              for hmm in self.hmms]
+        return stats
+
+    def _accumulate_inner_sufficient_statistics(self, stats, obs, framelogprob,
+                                                posteriors, fwdlattice,
+                                                bwdlattice, params,
+                                                k, currlogprob):
+        super(GaussianMixHMM, self)._accumulate_inner_sufficient_statistics(
+            stats, obs, framelogprob, posteriors, fwdlattice, bwdlattice,
+            params, k, currlogprob)
+        if 'h' in params:
+            stats['post'][k] += posteriors.sum(axis=0)
+            stats['obs'][k] += np.dot(posteriors.T, obs)
+            if self.hmms[k]._covariance_type in ('spherical', 'diag'):
+                stats['obs**2'][k] += np.dot(posteriors.T, obs ** 2)
+            elif self.hmms[k]._covariance_type in ('tied', 'full'):
+                for t, o in enumerate(obs):
+                    obsobsT = np.outer(o, o)
+                    for c in range(self.hmms[k].n_states):
+                        stats['obs*obs.T'][k][c] += posteriors[t, c] * obsobsT
+
+    def _accumulate_sufficient_statistics(self, stats, inner_stats, params):
+        super(GaussianMixHMM, self)._accumulate_sufficient_statistics(
+            stats, inner_stats, params)
+        component_weights = log_normalize(inner_stats['component_weights'], 0)
+        if 'h' in params:
+            for k in range(self.n_components):
+                stats['hmm_stats'][k]['post'] += component_weights[k] * \
+                    inner_stats['post'][k]
+                stats['hmm_stats'][k]['obs'] += component_weights[k] * \
+                    inner_stats['obs'][k]
+                if self.hmms[k]._covariance_type in ('spherical', 'diag'):
+                    stats['hmm_stats'][k]['obs**2'] += component_weights[k] * \
+                        inner_stats['obs**2'][k]
+                elif self.hmms[k]._covariance_type in ('tied', 'full'):
+                    stats['hmm_stats'][k]['obs*obs.T'] += \
+                        component_weights[k] * inner_stats['obs*obs.T'][k]
+
+    def fit(self, obs, **kwargs):
+        """Estimate model parameters.
+
+        An initialization step is performed before entering the EM
+        algorithm. If you want to avoid this step, pass proper
+        ``init_params`` keyword argument to estimator's constructor.
+
+        Parameters
+        ----------
+        obs : list
+            List of array-like observation sequences, each of which
+            has shape (n_i, n_features), where n_i is the length of
+            the i_th observation.
+        """
         return _BaseMixHMM.fit(self, obs, **kwargs)
