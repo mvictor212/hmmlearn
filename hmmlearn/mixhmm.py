@@ -112,7 +112,8 @@ class _BaseMixHMM(BaseEstimator):
                  component_weights=None, component_weights_prior=None,
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0):
+                 init_params=string.ascii_letters, verbose=0,
+                 tied=True):
 
         self.n_components = n_components
         self.n_states = n_states
@@ -127,6 +128,7 @@ class _BaseMixHMM(BaseEstimator):
         self.component_weights_prior = component_weights_prior
         self.random_state = random_state
         self.verbose = verbose
+        self.tied = tied
 
     def score_samples(self, obs):
         """Return the per-sequence likelihood of the data under the model.
@@ -505,7 +507,7 @@ class MultinomialMixHMM(_BaseMixHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, emissionprob_prior=None):
+                 verbose=0, emissionprob_prior=None, tied=True):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -521,7 +523,8 @@ class MultinomialMixHMM(_BaseMixHMM):
                              thresh=thresh,
                              params=params,
                              init_params=init_params,
-                             verbose=verbose)
+                             verbose=verbose,
+                             tied=tied)
         self.emissionprob_prior = emissionprob_prior
 
     def _init(self, obs, params='ph'):
@@ -533,14 +536,19 @@ class MultinomialMixHMM(_BaseMixHMM):
                 self.n_states,
                 emissionprob_prior=self.emissionprob_prior)
                 for _ in range(self.n_components)]
-            for hmm in self.hmms:
-                hmm._init(obs)
+            self.hmms[0]._init(obs)
+            emissionprob = self.hmms[0].emissionprob_
+            for hmm in self.hmms[1:]:
+                if self.tied:
+                    hmm.emissionprob_ = emissionprob
+                else:
+                    hmm._init(obs)
 
     def _initialize_inner_sufficient_statistics(self):
         stats = super(MultinomialMixHMM,
                       self)._initialize_inner_sufficient_statistics()
         stats['obs'] = [np.zeros((hmm.n_states, hmm.n_symbols))
-                        for hmm in self.hmms]
+                            for hmm in self.hmms]
         return stats
 
     def _accumulate_inner_sufficient_statistics(self, stats, obs, framelogprob,
@@ -559,9 +567,17 @@ class MultinomialMixHMM(_BaseMixHMM):
             stats, inner_stats, params)
         component_weights = log_normalize(inner_stats['component_weights'], 0)
         if 'h' in params:
-            for k in range(self.n_components):
-                stats['hmm_stats'][k]['obs'] += component_weights[k] * \
-                    inner_stats['obs'][k]
+            if self.tied:
+                tmp_obs_stats = np.zeros(np.shape(inner_stats['obs'][0]))
+                for k in range(self.n_components):
+                    tmp_obs_stats += component_weights[k] * \
+                        inner_stats['obs'][k]
+                for k in range(self.n_components):
+                    stats['hmm_stats'][k]['obs'] += tmp_obs_stats
+            else:
+                for k in range(self.n_components):
+                    stats['hmm_stats'][k]['obs'] += component_weights[k] * \
+                        inner_stats['obs'][k]
 
     def _check_input_symbols(self, obs):
         """check if input can be used for Multinomial.fit input must be both
@@ -679,7 +695,7 @@ class PoissonMixHMM(_BaseMixHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, rates_var=1.0):
+                 verbose=0, rates_var=1.0, tied=True):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -695,7 +711,8 @@ class PoissonMixHMM(_BaseMixHMM):
                              thresh=thresh,
                              params=params,
                              init_params=init_params,
-                             verbose=verbose)
+                             verbose=verbose,
+                             tied=tied)
         self.rates_var = rates_var
 
     def _init(self, obs, params='ph'):
@@ -705,8 +722,13 @@ class PoissonMixHMM(_BaseMixHMM):
         if ('h' in params) and (self.hmms is None):
             self.hmms = [PoissonHMM(self.n_states, rates_var=self.rates_var)
                          for _ in range(self.n_components)]
-            for hmm in self.hmms:
-                hmm._init(obs)
+            self.hmms[0]._init(obs)
+            rates = self.hmms[0].rates_
+            for hmm in self.hmms[1:]:
+                if self.tied:
+                    hmm.rates_ = rates
+                else:
+                    hmm._init(obs)
 
     def _initialize_inner_sufficient_statistics(self):
         stats = super(PoissonMixHMM,
@@ -731,11 +753,23 @@ class PoissonMixHMM(_BaseMixHMM):
             stats, inner_stats, params)
         component_weights = log_normalize(inner_stats['component_weights'], 0)
         if 'h' in params:
-            for k in range(self.n_components):
-                stats['hmm_stats'][k]['post'] += component_weights[k] * \
-                    inner_stats['post'][k]
-                stats['hmm_stats'][k]['obs'] += component_weights[k] * \
-                    inner_stats['obs'][k]
+            if self.tied:
+                tmp_post_stats = np.zeros(np.shape(inner_stats['post'][0]))
+                tmp_obs_stats = np.zeros(np.shape(inner_stats['obs'][0]))
+                for k in range(self.n_components):
+                    tmp_post_stats += component_weights[k] * \
+                        inner_stats['post'][k]
+                    tmp_obs_stats += component_weights[k] * \
+                        inner_stats['obs'][k]
+                for k in range(self.n_components):
+                    stats['hmm_stats'][k]['post'] += tmp_post_stats
+                    stats['hmm_stats'][k]['obs'] += tmp_obs_stats
+            else:
+                for k in range(self.n_components):
+                    stats['hmm_stats'][k]['post'] += component_weights[k] * \
+                        inner_stats['post'][k]
+                    stats['hmm_stats'][k]['obs'] += component_weights[k] * \
+                        inner_stats['obs'][k]
 
     def _check_input_symbols(self, obs):
         """check if input can be used for PoissonMixHMM. Input must be a list
@@ -846,7 +880,7 @@ class ExponentialMixHMM(_BaseMixHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, rates_var=1.0):
+                 verbose=0, rates_var=1.0, tied=True):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -862,7 +896,8 @@ class ExponentialMixHMM(_BaseMixHMM):
                              thresh=thresh,
                              params=params,
                              init_params=init_params,
-                             verbose=verbose)
+                             verbose=verbose,
+                             tied=tied)
         self.rates_var = rates_var
 
     def _init(self, obs, params='ph'):
@@ -873,8 +908,13 @@ class ExponentialMixHMM(_BaseMixHMM):
             self.hmms = [ExponentialHMM(self.n_states,
                                         rates_var=self.rates_var)
                          for _ in range(self.n_components)]
-            for hmm in self.hmms:
-                hmm._init(obs)
+            self.hmms[0]._init(obs)
+            rates = self.hmms[0].rates_
+            for hmm in self.hmms[1:]:
+                if self.tied:
+                    hmm.rates_ = rates
+                else:
+                    hmm._init(obs)
 
     def _initialize_inner_sufficient_statistics(self):
         stats = super(ExponentialMixHMM,
@@ -899,11 +939,23 @@ class ExponentialMixHMM(_BaseMixHMM):
             stats, inner_stats, params)
         component_weights = log_normalize(inner_stats['component_weights'], 0)
         if 'h' in params:
-            for k in range(self.n_components):
-                stats['hmm_stats'][k]['post'] += component_weights[k] * \
-                    inner_stats['post'][k]
-                stats['hmm_stats'][k]['obs'] += component_weights[k] * \
-                    inner_stats['obs'][k]
+            if self.tied:
+                tmp_post_stats = np.zeros(np.shape(inner_stats['post'][0]))
+                tmp_obs_stats = np.zeros(np.shape(inner_stats['obs'][0]))
+                for k in range(self.n_components):
+                    tmp_post_stats += component_weights[k] * \
+                        inner_stats['post'][k]
+                    tmp_obs_stats += component_weights[k] * \
+                        inner_stats['obs'][k]
+                for k in range(self.n_components):
+                    stats['hmm_stats'][k]['post'] += tmp_post_stats
+                    stats['hmm_stats'][k]['obs'] += tmp_obs_stats
+            else:
+                for k in range(self.n_components):
+                    stats['hmm_stats'][k]['post'] += component_weights[k] * \
+                        inner_stats['post'][k]
+                    stats['hmm_stats'][k]['obs'] += component_weights[k] * \
+                        inner_stats['obs'][k]
 
     def _check_input_symbols(self, obs):
         """check if input can be used for ExponentialHMM. Input must be a list
@@ -1017,7 +1069,7 @@ class GaussianMixHMM(_BaseMixHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, means_var=1.0):
+                 verbose=0, means_var=1.0, tied=True):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1033,7 +1085,8 @@ class GaussianMixHMM(_BaseMixHMM):
                              thresh=thresh,
                              params=params,
                              init_params=init_params,
-                             verbose=verbose)
+                             verbose=verbose,
+                             tied=tied)
         self.means_var = means_var
 
     def _init(self, obs, params='ph'):
@@ -1043,8 +1096,15 @@ class GaussianMixHMM(_BaseMixHMM):
         if ('h' in params) and (self.hmms is None):
             self.hmms = [GaussianHMM(self.n_states, means_var=self.means_var)
                          for _ in range(self.n_components)]
-            for hmm in self.hmms:
-                hmm._init(obs)
+            self.hmms[0]._init(obs)
+            means = self.hmms[0].means_
+            covars = self.hmms[0].covars_
+            for hmm in self.hmms[1:]:
+                if self.tied:
+                    hmm.means_ = means
+                    hmm.covars_ = covars
+                else:
+                    hmm._init(obs)
 
     def _initialize_inner_sufficient_statistics(self):
         stats = super(GaussianMixHMM,
@@ -1082,17 +1142,43 @@ class GaussianMixHMM(_BaseMixHMM):
             stats, inner_stats, params)
         component_weights = log_normalize(inner_stats['component_weights'], 0)
         if 'h' in params:
-            for k in range(self.n_components):
-                stats['hmm_stats'][k]['post'] += component_weights[k] * \
-                    inner_stats['post'][k]
-                stats['hmm_stats'][k]['obs'] += component_weights[k] * \
-                    inner_stats['obs'][k]
-                if self.hmms[k]._covariance_type in ('spherical', 'diag'):
-                    stats['hmm_stats'][k]['obs**2'] += component_weights[k] * \
-                        inner_stats['obs**2'][k]
-                elif self.hmms[k]._covariance_type in ('tied', 'full'):
-                    stats['hmm_stats'][k]['obs*obs.T'] += \
-                        component_weights[k] * inner_stats['obs*obs.T'][k]
+            if self.tied:
+                tmp_post_stats = np.zeros(np.shape(inner_stats['post'][0]))
+                tmp_obs_stats = np.zeros(np.shape(inner_stats['obs'][0]))
+                if self.hmms[0]._covariance_type in ('spherical', 'diag'):
+                    tmp_obs2_stats = np.zeros(np.shape(inner_stats['obs**2'][0]))
+                elif self.hmms[0]._covariante_type in ('tied', 'full'):
+                    tmp_obsobsT_stats = np.zeros(np.shape(inner_stats['obs*obs.T'][0]))
+                for k in range(self.n_components):
+                    tmp_post_stats += component_weights[k] * \
+                        inner_stats['post'][k]
+                    tmp_obs_stats += component_weights[k] * \
+                        inner_stats['obs'][k]
+                    if self.hmms[0]._covariance_type in ('spherical', 'diag'):
+                        tmp_obs2_stats += component_weights[k] * \
+                            inner_stats['obs**2'][k]
+                    elif self.hmms[0]._covariance_type in ('tied', 'full'):
+                       tmp_obsobsT_stats += component_weights[k] * \
+                            inner_stats['obs*obs.T'][k]
+                for k in range(self.n_components):
+                    stats['hmm_stats'][k]['post'] += tmp_post_stats
+                    stats['hmm_stats'][k]['obs'] += tmp_obs_stats
+                    if self.hmms[k]._covariance_type in ('spherical', 'diag'):
+                        stats['hmm_stats'][k]['obs**2'] += tmp_obs2_stats
+                    elif self.hmms[k]._covariance_type in ('tied', 'full'):
+                        stats['hmm_stats'][k]['obs*obs.T'] += tmp_obsobsT_stats
+            else:
+                for k in range(self.n_components):
+                    stats['hmm_stats'][k]['post'] += component_weights[k] * \
+                        inner_stats['post'][k]
+                    stats['hmm_stats'][k]['obs'] += component_weights[k] * \
+                        inner_stats['obs'][k]
+                    if self.hmms[k]._covariance_type in ('spherical', 'diag'):
+                        stats['hmm_stats'][k]['obs**2'] += component_weights[k] * \
+                            inner_stats['obs**2'][k]
+                    elif self.hmms[k]._covariance_type in ('tied', 'full'):
+                        stats['hmm_stats'][k]['obs*obs.T'] += \
+                            component_weights[k] * inner_stats['obs*obs.T'][k]
 
     def fit(self, obs, **kwargs):
         """Estimate model parameters.
