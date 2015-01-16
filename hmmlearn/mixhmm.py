@@ -10,6 +10,7 @@ hidden Markov models.
 import string
 
 import numpy as np
+import multiprocessing as mp
 
 from copy import deepcopy
 from sklearn.utils import check_random_state
@@ -18,7 +19,7 @@ from sklearn.base import BaseEstimator
 
 from .hmm import (GaussianHMM, MultinomialHMM,
                   PoissonHMM, ExponentialHMM, VerboseReporter,
-                  randomize, normalize, log_normalize)
+                  randomize, normalize, log_normalize, batches)
 
 from . import _hmmc
 
@@ -28,6 +29,10 @@ ZEROLOGPROB = -1e200
 EPS = np.finfo(float).eps
 NEGINF = -np.inf
 decoder_algorithms = ("viterbi", "map")
+
+
+def unwrap_self_estep(arg, **kwarg):
+    return _BaseMixHMM._do_estep(*arg, **kwarg)
 
 
 class _BaseMixHMM(BaseEstimator):
@@ -113,7 +118,7 @@ class _BaseMixHMM(BaseEstimator):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters, verbose=0,
-                 tied=True):
+                 tied=True, n_jobs=1, batch_size=1):
 
         self.n_components = n_components
         self.n_states = n_states
@@ -129,6 +134,8 @@ class _BaseMixHMM(BaseEstimator):
         self.random_state = random_state
         self.verbose = verbose
         self.tied = tied
+        self.n_jobs = n_jobs
+        self.batch_size = batch_size
 
     def score_samples(self, obs):
         """Return the per-sequence likelihood of the data under the model.
@@ -338,6 +345,9 @@ class _BaseMixHMM(BaseEstimator):
         parameter.
         """
 
+        n_batches = (len(obs) // self.batch_size) + \
+            (1 if len(obs) % self.batch_size else 0)
+
         self._init(obs, self.init_params)
 
         if self.verbose:
@@ -347,26 +357,23 @@ class _BaseMixHMM(BaseEstimator):
         logprob = []
         for i in range(self.n_iter):
             # Expectation step
-            stats = self._initialize_sufficient_statistics()
-            curr_logprob = np.zeros(self.n_components)
-            logprob.append(0)
-            for n, seq in enumerate(obs):
-                inner_stats = self._initialize_inner_sufficient_statistics()
-                framelogprob = self._compute_log_likelihood(seq)
-                for k, hmm in enumerate(self.hmms):
-                    lpr, fwdlattice = hmm._do_forward_pass(
-                        framelogprob[:, :, k])
-                    bwdlattice = hmm._do_backward_pass(framelogprob[:, :, k])
-                    gamma = fwdlattice + bwdlattice
-                    posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
-                    curr_logprob[k] = lpr + self._log_component_weights[k]
-                    self._accumulate_inner_sufficient_statistics(
-                        inner_stats, seq, framelogprob[:, :, k], posteriors,
-                        fwdlattice, bwdlattice, self.params, k,
-                        curr_logprob[k])
-                self._accumulate_sufficient_statistics(
-                    stats, inner_stats, self.params)
-                logprob[-1] += logsumexp(curr_logprob)
+            if self.n_jobs == 1:
+                stats = self._initialize_sufficient_statistics()
+                logprob.append(0)
+                for obs_batch in batches(obs, self.batch_size):
+                    local_stats, lpr = self._do_estep(obs_batch)
+                    stats = self._merge_sum(stats, local_stats)
+                    logprob[-1] += lpr
+            else:
+                pool = mp.Pool(processes=self.n_jobs)
+                results = pool.map(unwrap_self_estep,
+                                   zip([self] * n_batches,
+                                       batches(obs, self.batch_size)))
+                pool.terminate()
+                stats = reduce(self._merge_sum,
+                               [x[0] for x in results],
+                               self._initialize_sufficient_statistics())
+                logprob.append(sum([x[1] for x in results]))
             if i > 0:
                 improvement = logprob[-1] - logprob[-2]
             else:
@@ -464,6 +471,40 @@ class _BaseMixHMM(BaseEstimator):
                 stats['hmm_stats'][k]['trans'] += component_weights[k] * \
                     inner_stats['trans'][k]
 
+    def _merge_sum(self, stats, additional_stats):
+        if 'p' in self.params:
+            stats['component_weights'] += additional_stats['component_weights']
+        if 'h' in self.params:
+            for k in range(self.n_components):
+                stats['hmm_stats'][k]['start'] += \
+                    additional_stats['hmm_stats'][k]['start']
+                stats['hmm_stats'][k]['trans'] += \
+                    additional_stats['hmm_stats'][k]['trans']
+        return stats
+
+    def _do_estep(self, obs_batch):
+        local_stats = self._initialize_sufficient_statistics()
+        local_logprob = 0
+        for n, seq in enumerate(obs_batch):
+            curr_logprob = np.zeros(self.n_components)
+            local_inner_stats = self._initialize_inner_sufficient_statistics()
+            framelogprob = self._compute_log_likelihood(seq)
+            for k, hmm in enumerate(self.hmms):
+                lpr, fwdlattice = hmm._do_forward_pass(
+                    framelogprob[:, :, k])
+                bwdlattice = hmm._do_backward_pass(framelogprob[:, :, k])
+                gamma = fwdlattice + bwdlattice
+                posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
+                curr_logprob[k] = lpr + self._log_component_weights[k]
+                self._accumulate_inner_sufficient_statistics(
+                    local_inner_stats, seq, framelogprob[:, :, k], posteriors,
+                    fwdlattice, bwdlattice, self.params, k,
+                    curr_logprob[k])
+            self._accumulate_sufficient_statistics(
+                local_stats, local_inner_stats, self.params)
+            local_logprob += logsumexp(curr_logprob)
+        return local_stats, local_logprob
+
     def _do_mstep(self, stats, params):
         # Based on Huang, Acero, Hon, "Spoken Language Processing",
         # p. 443 - 445
@@ -549,7 +590,8 @@ class MultinomialMixHMM(_BaseMixHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, emissionprob_prior=None, tied=True):
+                 verbose=0, emissionprob_prior=None, tied=True,
+                 n_jobs=1, batch_size=1):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -566,7 +608,9 @@ class MultinomialMixHMM(_BaseMixHMM):
                              params=params,
                              init_params=init_params,
                              verbose=verbose,
-                             tied=tied)
+                             tied=tied,
+                             n_jobs=n_jobs,
+                             batch_size=batch_size)
         self.emissionprob_prior = emissionprob_prior
 
     def _init(self, obs, params='ph'):
@@ -620,6 +664,14 @@ class MultinomialMixHMM(_BaseMixHMM):
                 for k in range(self.n_components):
                     stats['hmm_stats'][k]['obs'] += component_weights[k] * \
                         inner_stats['obs'][k]
+
+    def _merge_sum(self, stats, additional_stats):
+        stats = super(MultinomialMixHMM, self)._merge_sum(stats, additional_stats)
+        if 'h' in self.params:
+            for k in range(self.n_components):
+                stats['hmm_stats'][k]['obs'] += \
+                    additional_stats['hmm_stats'][k]['obs']
+        return stats
 
     def _check_input_symbols(self, obs):
         """check if input can be used for Multinomial.fit input must be both
@@ -745,7 +797,8 @@ class PoissonMixHMM(_BaseMixHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, rates_var=1.0, tied=True):
+                 verbose=0, rates_var=1.0, tied=True,
+                 n_jobs=1, batch_size=1):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -762,7 +815,9 @@ class PoissonMixHMM(_BaseMixHMM):
                              params=params,
                              init_params=init_params,
                              verbose=verbose,
-                             tied=tied)
+                             tied=tied,
+                             n_jobs=n_jobs,
+                             batch_size=batch_size)
         self.rates_var = rates_var
 
     def _init(self, obs, params='ph'):
@@ -820,6 +875,16 @@ class PoissonMixHMM(_BaseMixHMM):
                         inner_stats['post'][k]
                     stats['hmm_stats'][k]['obs'] += component_weights[k] * \
                         inner_stats['obs'][k]
+
+    def _merge_sum(self, stats, additional_stats):
+        stats = super(PoissonMixHMM, self)._merge_sum(stats, additional_stats)
+        if 'h' in self.params:
+            for k in range(self.n_components):
+                stats['hmm_stats'][k]['post'] += \
+                    additional_stats['hmm_stats'][k]['post']
+                stats['hmm_stats'][k]['obs'] += \
+                    additional_stats['hmm_stats'][k]['obs']
+        return stats
 
     def _check_input_symbols(self, obs):
         """check if input can be used for PoissonMixHMM. Input must be a list
@@ -938,7 +1003,8 @@ class ExponentialMixHMM(_BaseMixHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, rates_var=1.0, tied=True):
+                 verbose=0, rates_var=1.0, tied=True,
+                 n_jobs=1, batch_size=1):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -955,7 +1021,9 @@ class ExponentialMixHMM(_BaseMixHMM):
                              params=params,
                              init_params=init_params,
                              verbose=verbose,
-                             tied=tied)
+                             tied=tied,
+                             n_jobs=n_jobs,
+                             batch_size=batch_size)
         self.rates_var = rates_var
 
     def _init(self, obs, params='ph'):
@@ -1014,6 +1082,16 @@ class ExponentialMixHMM(_BaseMixHMM):
                         inner_stats['post'][k]
                     stats['hmm_stats'][k]['obs'] += component_weights[k] * \
                         inner_stats['obs'][k]
+
+    def _merge_sum(self, stats, additional_stats):
+        stats = super(ExponentialMixHMM, self)._merge_sum(stats, additional_stats)
+        if 'h' in self.params:
+            for k in range(self.n_components):
+                stats['hmm_stats'][k]['post'] += \
+                    additional_stats['hmm_stats'][k]['post']
+                stats['hmm_stats'][k]['obs'] += \
+                    additional_stats['hmm_stats'][k]['obs']
+        return stats
 
     def _check_input_symbols(self, obs):
         """check if input can be used for ExponentialHMM. Input must be a list
@@ -1135,7 +1213,8 @@ class GaussianMixHMM(_BaseMixHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, means_var=1.0, tied=True):
+                 verbose=0, means_var=1.0, tied=True,
+                 n_jobs=1, batch_size=1):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1152,7 +1231,9 @@ class GaussianMixHMM(_BaseMixHMM):
                              params=params,
                              init_params=init_params,
                              verbose=verbose,
-                             tied=tied)
+                             tied=tied,
+                             n_jobs=n_jobs,
+                             batch_size=batch_size)
         self.means_var = means_var
 
     def _init(self, obs, params='ph'):
@@ -1245,6 +1326,22 @@ class GaussianMixHMM(_BaseMixHMM):
                     elif self.hmms[k]._covariance_type in ('tied', 'full'):
                         stats['hmm_stats'][k]['obs*obs.T'] += \
                             component_weights[k] * inner_stats['obs*obs.T'][k]
+
+    def _merge_sum(self, stats, additional_stats):
+        stats = super(GaussianMixHMM, self)._merge_sum(stats, additional_stats)
+        if 'h' in self.params:
+            for k in range(self.n_components):
+                stats['hmm_stats'][k]['post'] += \
+                    additional_stats['hmm_stats'][k]['post']
+                stats['hmm_stats'][k]['obs'] += \
+                    additional_stats['hmm_stats'][k]['obs']
+                if self.hmms[k]._covariance_type in ('spherical', 'diag'):
+                    stats['hmm_stats'][k]['obs**2'] += \
+                        additional_stats['hmm_stats'][k]['obs**2']
+                elif self.hmms[k]._covariance_type in ('tied', 'full'):
+                    stats['hmm_stats'][k]['obs*obs.T'] += \
+                        additional_stats['hmm_stats'][k]['obs*obs.T']
+        return stats
 
     def fit(self, obs, **kwargs):
         """Estimate model parameters.

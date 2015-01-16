@@ -12,6 +12,7 @@ The :mod:`hmmlearn.hmm` module implements hidden Markov models.
 import string
 
 import numpy as np
+import multiprocessing as mp
 from numpy.random import multivariate_normal, normal
 
 from sklearn.utils import check_random_state
@@ -38,6 +39,28 @@ ZEROLOGPROB = -1e200
 EPS = np.finfo(float).eps
 NEGINF = -np.inf
 decoder_algorithms = ("viterbi", "map")
+
+
+def batches(l, n):
+    """ Yield successive n-sized batches from l.
+    """
+    for i in xrange(0, len(l), n):
+        yield l[i:i+n]
+
+
+def unwrap_self_estep(arg, **kwarg):
+    return _BaseHMM._do_estep(*arg, **kwarg)
+
+
+def merge_sum(x, y):
+    D = {}
+    for k in x.keys():
+        D[k] = x[k] + y[k]
+    return D
+
+
+def reduce_merge_sum(L):
+    return reduce(lambda x, y: merge_sum(x, y), L)
 
 
 def log_normalize(A, axis=None):
@@ -193,7 +216,8 @@ class _BaseHMM(BaseEstimator):
                  startprob_prior=None, transmat_prior=None,
                  algorithm="viterbi", random_state=None,
                  n_iter=10, thresh=1e-2, params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0):
+                 init_params=string.ascii_letters, verbose=0,
+                 n_jobs=1, batch_size=1):
 
         self.n_states = n_states
         self.n_iter = n_iter
@@ -212,6 +236,8 @@ class _BaseHMM(BaseEstimator):
         self._algorithm = algorithm
         self.random_state = random_state
         self.verbose = verbose
+        self.n_jobs = n_jobs
+        self.batch_size = batch_size
 
     def eval(self, X):
         return self.score_samples(X)
@@ -516,6 +542,8 @@ class _BaseHMM(BaseEstimator):
         parameter.
         """
 
+        n_batches = (len(obs) // self.batch_size) + \
+            (1 if len(obs) % self.batch_size else 0)
         if self.algorithm not in decoder_algorithms:
             self._algorithm = "viterbi"
 
@@ -528,18 +556,21 @@ class _BaseHMM(BaseEstimator):
         logprob = []
         for i in range(self.n_iter):
             # Expectation step
-            stats = self._initialize_sufficient_statistics()
-            curr_logprob = 0
-            for seq in obs:
-                framelogprob = self._compute_log_likelihood(seq)
-                lpr, fwdlattice = self._do_forward_pass(framelogprob)
-                bwdlattice = self._do_backward_pass(framelogprob)
-                gamma = fwdlattice + bwdlattice
-                posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
-                curr_logprob += lpr
-                self._accumulate_sufficient_statistics(
-                    stats, seq, framelogprob, posteriors, fwdlattice,
-                    bwdlattice, self.params)
+            if self.n_jobs == 1:
+                stats = self._initialize_sufficient_statistics()
+                curr_logprob = 0
+                for obs_batch in batches(obs, self.batch_size):
+                    seq_stats, lpr = self._do_estep(obs_batch)
+                    stats = merge_sum(stats, seq_stats)
+                    curr_logprob += lpr
+            else:
+                pool = mp.Pool(processes=self.n_jobs)
+                results = pool.map(unwrap_self_estep,
+                                   zip([self] * n_batches,
+                                       batches(obs, self.batch_size)))
+                pool.terminate()
+                stats = reduce_merge_sum([x[0] for x in results])
+                curr_logprob = sum([x[1] for x in results])
             logprob.append(curr_logprob)
             if i > 0:
                 improvement = logprob[-1] - logprob[-2]
@@ -686,6 +717,21 @@ class _BaseHMM(BaseEstimator):
                                      framelogprob, lnP, lneta)
                 stats['trans'] += np.exp(np.minimum(logsumexp(lneta, 0), 700))
 
+    def _do_estep(self, obs_batch):
+        local_stats = self._initialize_sufficient_statistics()
+        curr_logprob = 0
+        for seq in obs_batch:
+            framelogprob = self._compute_log_likelihood(seq)
+            lpr, fwdlattice = self._do_forward_pass(framelogprob)
+            curr_logprob += lpr
+            bwdlattice = self._do_backward_pass(framelogprob)
+            gamma = fwdlattice + bwdlattice
+            posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
+            self._accumulate_sufficient_statistics(local_stats, seq, framelogprob,
+                                                   posteriors, fwdlattice,
+                                                   bwdlattice, self.params)
+        return local_stats, curr_logprob
+
     def _do_mstep(self, stats, params):
         # Based on Huang, Acero, Hon, "Spoken Language Processing",
         # p. 443 - 445
@@ -793,13 +839,17 @@ class GaussianHMM(_BaseHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0):
+                 verbose=0,
+                 n_jobs=1,
+                 batch_size=1):
         _BaseHMM.__init__(self, n_states, startprob, transmat,
                           startprob_prior=startprob_prior,
                           transmat_prior=transmat_prior, algorithm=algorithm,
                           random_state=random_state, n_iter=n_iter,
                           thresh=thresh, params=params,
-                          init_params=init_params, verbose=verbose)
+                          init_params=init_params, verbose=verbose,
+                          n_jobs=n_jobs,
+                          batch_size=batch_size)
 
         self._covariance_type = covariance_type
         if not covariance_type in ['spherical', 'tied', 'diag', 'full']:
@@ -1070,7 +1120,7 @@ class MultinomialHMM(_BaseHMM):
                  emissionprob_prior=None, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters, init_params=string.ascii_letters,
-                 verbose=0):
+                 verbose=0, n_jobs=1, batch_size=1):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1086,7 +1136,10 @@ class MultinomialHMM(_BaseHMM):
                           n_iter=n_iter,
                           thresh=thresh,
                           params=params,
-                          init_params=init_params, verbose=verbose)
+                          init_params=init_params,
+                          verbose=verbose,
+                          n_jobs=n_jobs,
+                          batch_size=batch_size)
 
         self.emissionprob_prior = emissionprob_prior
 
@@ -1279,7 +1332,8 @@ class PoissonHMM(_BaseHMM):
                  rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0):
+                 init_params=string.ascii_letters, verbose=0,
+                 n_jobs=1, batch_size=1):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1295,7 +1349,10 @@ class PoissonHMM(_BaseHMM):
                           n_iter=n_iter,
                           thresh=thresh,
                           params=params,
-                          init_params=init_params, verbose=verbose)
+                          init_params=init_params,
+                          verbose=verbose,
+                          n_jobs=n_jobs,
+                          batch_size=batch_size)
         self.rates_var = rates_var
 
     def _get_rates(self):
@@ -1467,7 +1524,8 @@ class ExponentialHMM(_BaseHMM):
                  rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0):
+                 init_params=string.ascii_letters, verbose=0,
+                 n_jobs=1, batch_size=1):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1483,7 +1541,10 @@ class ExponentialHMM(_BaseHMM):
                           n_iter=n_iter,
                           thresh=thresh,
                           params=params,
-                          init_params=init_params, verbose=verbose)
+                          init_params=init_params,
+                          verbose=verbose,
+                          n_jobs=n_jobs,
+                          batch_size=batch_size)
         self.rates_var = rates_var
 
     def _get_rates(self):
@@ -1660,7 +1721,8 @@ class GMMHMM(_BaseHMM):
                  covars_prior=1e-2, random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, means_var=1.0):
+                 verbose=0, means_var=1.0,
+                 n_jobs=1, batch_size=1):
         """Create a hidden Markov model with GMM emissions.
 
         Parameters
@@ -1677,7 +1739,9 @@ class GMMHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose)
+                          verbose=verbose,
+                          n_jobs=n_jobs,
+                          batch_size=batch_size)
 
         # XXX: Hotfit for n_mix that is incompatible with the scikit's
         # BaseEstimator API
