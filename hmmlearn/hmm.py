@@ -10,6 +10,7 @@ The :mod:`hmmlearn.hmm` module implements hidden Markov models.
 """
 
 import string
+import cPickle
 
 import numpy as np
 import multiprocessing as mp
@@ -218,7 +219,7 @@ class _BaseHMM(BaseEstimator):
                  algorithm="viterbi", random_state=None,
                  n_iter=10, thresh=1e-2, params=string.ascii_letters,
                  init_params=string.ascii_letters, verbose=0,
-                 n_jobs=1, batch_size=1):
+                 n_jobs=1, batch_size=1, memory_safe=False):
 
         self.n_states = n_states
         self.n_iter = n_iter
@@ -239,6 +240,7 @@ class _BaseHMM(BaseEstimator):
         self.verbose = verbose
         self.n_jobs = n_jobs
         self.batch_size = batch_size
+        self.memory_safe = memory_safe
 
     def eval(self, X):
         return self.score_samples(X)
@@ -559,7 +561,9 @@ class _BaseHMM(BaseEstimator):
         obs : list
             List of array-like observation sequences, each of which
             has shape (n_i, n_features), where n_i is the length of
-            the i_th observation.
+            the i_th observation. Alternatively, a list of strings,
+            each of which is a filepath to a pickled object, being
+            a list of array-like observation sequences.
 
         Notes
         -----
@@ -570,6 +574,10 @@ class _BaseHMM(BaseEstimator):
         or strengthening the appropriate subclass-specific regularization
         parameter.
         """
+
+        if self.memory_safe and (not isinstance(obs[0], str)):
+            raise ValueError("Filepath locations must be provided as \
+                             observations to be memory safe.")
 
         n_batches = (len(obs) // self.batch_size) + \
             (1 if len(obs) % self.batch_size else 0)
@@ -747,9 +755,16 @@ class _BaseHMM(BaseEstimator):
                 stats['trans'] += np.exp(np.minimum(logsumexp(lneta, 0), 700))
 
     def _do_estep(self, obs_batch):
+        if self.memory_safe:
+            local_obs = reduce(lambda x, y: x + y,
+                               [cPickle.load(open(filename, 'r'))
+                                for filename in obs_batch],
+                               [])
+        else:
+            local_obs = obs_batch
         local_stats = self._initialize_sufficient_statistics()
         curr_logprob = 0
-        for seq in obs_batch:
+        for seq in local_obs:
             framelogprob = self._compute_log_likelihood(seq)
             lpr, fwdlattice = self._do_forward_pass(framelogprob)
             curr_logprob += lpr
@@ -759,6 +774,8 @@ class _BaseHMM(BaseEstimator):
             self._accumulate_sufficient_statistics(local_stats, seq, framelogprob,
                                                    posteriors, fwdlattice,
                                                    bwdlattice, self.params)
+        if self.memory_safe:
+            local_obs = None
         return local_stats, curr_logprob
 
     def _do_mstep(self, stats, params):
@@ -870,7 +887,8 @@ class GaussianHMM(_BaseHMM):
                  init_params=string.ascii_letters,
                  verbose=0,
                  n_jobs=1,
-                 batch_size=1):
+                 batch_size=1,
+                 memory_safe=False):
         _BaseHMM.__init__(self, n_states, startprob, transmat,
                           startprob_prior=startprob_prior,
                           transmat_prior=transmat_prior, algorithm=algorithm,
@@ -878,7 +896,8 @@ class GaussianHMM(_BaseHMM):
                           thresh=thresh, params=params,
                           init_params=init_params, verbose=verbose,
                           n_jobs=n_jobs,
-                          batch_size=batch_size)
+                          batch_size=batch_size,
+                          memory_safe=memory_safe)
 
         self._covariance_type = covariance_type
         if not covariance_type in ['spherical', 'tied', 'diag', 'full']:
@@ -945,14 +964,17 @@ class GaussianHMM(_BaseHMM):
     def _init(self, obs, params='stmc'):
         super(GaussianHMM, self)._init(obs, params=params)
 
+        if self.memory_safe:
+            concat_obs = np.vstack(cPickle.load(open(obs[0], 'r')))
+        else:
+            concat_obs = np.vstack(obs)
         if (hasattr(self, 'n_features')
-                and self.n_features != obs[0].shape[1]):
+                and self.n_features != concat_obs[0].shape[1]):
             raise ValueError('Unexpected number of dimensions, got %s but '
-                             'expected %s' % (obs[0].shape[1],
+                             'expected %s' % (concat_obs[0].shape[1],
                                               self.n_features))
 
-        self.n_features = obs[0].shape[1]
-        concat_obs = np.vstack(obs)
+        self.n_features = concat_obs[0].shape[1]
 
         if 'm' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
@@ -1072,7 +1094,9 @@ class GaussianHMM(_BaseHMM):
         obs : list
             List of array-like observation sequences, each of which
             has shape (n_i, n_features), where n_i is the length of
-            the i_th observation.
+            the i_th observation. Alternatively, a list of strings,
+            each of which is a filepath to a pickled object, being
+            a list of array-like observation sequences.
 
         Notes
         -----
@@ -1149,7 +1173,7 @@ class MultinomialHMM(_BaseHMM):
                  emissionprob_prior=None, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters, init_params=string.ascii_letters,
-                 verbose=0, n_jobs=1, batch_size=1):
+                 verbose=0, n_jobs=1, batch_size=1, memory_safe=False):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1168,7 +1192,8 @@ class MultinomialHMM(_BaseHMM):
                           init_params=init_params,
                           verbose=verbose,
                           n_jobs=n_jobs,
-                          batch_size=batch_size)
+                          batch_size=batch_size,
+                          memory_safe=memory_safe)
 
         self.emissionprob_prior = emissionprob_prior
 
@@ -1213,7 +1238,11 @@ class MultinomialHMM(_BaseHMM):
             if not hasattr(self, 'n_symbols'):
                 symbols = set()
                 for o in obs:
-                    symbols = symbols.union(set(o))
+                    if self.memory_safe:
+                        symbols = symbols.union(set(np.concatenate(
+                            cPickle.load(open(o, 'r')))))
+                    else:
+                        symbols = symbols.union(set(o))
                 self.n_symbols = len(symbols)
             if self.emissionprob_prior is None:
                 self.emissionprob_prior = np.ones((self.n_states,
@@ -1250,7 +1279,13 @@ class MultinomialHMM(_BaseHMM):
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, 0, 3, 5, 10] not
         """
 
-        symbols = np.concatenate(obs)
+        if self.memory_safe:
+            symbols = []
+            for o in obs:
+                symbols += cPickle.load(open(o, 'r'))
+            symbols = np.concatenate(symbols)
+        else:
+            symbols = np.concatenate(obs)
 
         if symbols.dtype.kind != 'i':
             # input symbols must be integer
@@ -1288,7 +1323,9 @@ class MultinomialHMM(_BaseHMM):
         obs : list
             List of array-like observation sequences, each of which
             has shape (n_i, n_features), where n_i is the length of
-            the i_th observation.
+            the i_th observation. Alternatively, a list of strings,
+            each of which is a filepath to a pickled object, being
+            a list of array-like observation sequences.
         """
         err_msg = ("Input must be a list of non-negative integer arrays where "
                    "in all, every element must be continuous, but %s was "
@@ -1362,7 +1399,7 @@ class PoissonHMM(_BaseHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters, verbose=0,
-                 n_jobs=1, batch_size=1):
+                 n_jobs=1, batch_size=1, memory_safe=False):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1381,7 +1418,8 @@ class PoissonHMM(_BaseHMM):
                           init_params=init_params,
                           verbose=verbose,
                           n_jobs=n_jobs,
-                          batch_size=batch_size)
+                          batch_size=batch_size,
+                          memory_safe=memory_safe)
         self.rates_var = rates_var
 
     def _get_rates(self):
@@ -1403,7 +1441,10 @@ class PoissonHMM(_BaseHMM):
     def _init(self, obs, params='str'):
         super(PoissonHMM, self)._init(obs, params=params)
 
-        concat_obs = np.concatenate(obs)
+        if self.memory_safe:
+            concat_obs = np.concatenate(cPickle.load(open(obs[0], 'r')))
+        else:
+            concat_obs = np.concatenate(obs)
         if 'r' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
                 np.atleast_2d(concat_obs).T)
@@ -1439,20 +1480,34 @@ class PoissonHMM(_BaseHMM):
         of non-negative integers.
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, -1, 3, 5, 10] not
         """
-        symbols = reduce(lambda x, y: np.concatenate([x, y]),
-                         obs)
+        if self.memory_safe:
+            for o in obs:
+                symbols = np.concatenate(cPickle.load(open(o, 'r')))
 
-        if symbols.dtype.kind != 'i':
-            # input symbols must be integer
-            return False
+                if symbols.dtype.kind != 'i':
+                    # input symbols must be integer
+                    return False
 
-        if len(symbols) == 1:
-            # input too short
-            return False
+                if len(symbols) == 1:
+                    # input too short
+                    return False
 
-        if np.any(symbols < 0):
-            # input contains negative intiger
-            return False
+                if np.any(symbols < 0):
+                    # input contains negative intiger
+                    return False
+        else:
+            symbols = np.concatenate(obs)
+            if symbols.dtype.kind != 'i':
+                # input symbols must be integer
+                return False
+
+            if len(symbols) == 1:
+                # input too short
+                return False
+
+            if np.any(symbols < 0):
+                # input contains negative intiger
+                return False
 
         return True
 
@@ -1473,7 +1528,9 @@ class PoissonHMM(_BaseHMM):
         obs : list
             List of array-like observation sequences, each of which
             has shape (n_i, n_features), where n_i is the length of
-            the i_th observation.
+            the i_th observation. Alternatively, a list of strings,
+            each of which is a filepath to a pickled object, being
+            a list of array-like observation sequences.
 
         Notes
         -----
@@ -1554,7 +1611,7 @@ class ExponentialHMM(_BaseHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters, verbose=0,
-                 n_jobs=1, batch_size=1):
+                 n_jobs=1, batch_size=1, memory_safe=False):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1573,7 +1630,8 @@ class ExponentialHMM(_BaseHMM):
                           init_params=init_params,
                           verbose=verbose,
                           n_jobs=n_jobs,
-                          batch_size=batch_size)
+                          batch_size=batch_size,
+                          memory_safe=memory_safe)
         self.rates_var = rates_var
 
     def _get_rates(self):
@@ -1595,7 +1653,10 @@ class ExponentialHMM(_BaseHMM):
     def _init(self, obs, params='str'):
         super(ExponentialHMM, self)._init(obs, params=params)
 
-        concat_obs = np.concatenate(obs)
+        if self.memory_safe:
+            concat_obs = np.concatenate(cPickle.load(open(obs[0], 'r')))
+        else:
+            concat_obs = np.concatenate(obs)
         if 'r' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
                 np.atleast_2d(concat_obs).T)
@@ -1631,20 +1692,35 @@ class ExponentialHMM(_BaseHMM):
         of non-negative reals.
         e.g. x = [0., 0.5, 2.3] is OK and y = [0.0, -1.0, 3.3, 5.4, 10.9] not
         """
-        symbols = reduce(lambda x, y: np.concatenate([x, y]),
-                         obs)
 
-        if symbols.dtype.kind not in ('f', 'i'):
-            # input symbols must be real
-            return False
+        if self.memory_safe:
+            for o in obs:
+                symbols = np.concatenate(cPickle.load(open(o, 'r')))
 
-        if len(symbols) == 1:
-            # input too short
-            return False
+                if symbols.dtype.kind not in ('f', 'i'):
+                    # input symbols must be integer
+                    return False
 
-        if np.any(symbols < 0):
-            # input contains negative intiger
-            return False
+                if len(symbols) == 1:
+                    # input too short
+                    return False
+
+                if np.any(symbols < 0):
+                    # input contains negative intiger
+                    return False
+        else:
+            symbols = np.concatenate(obs)
+            if symbols.dtype.kind not in ('f', 'i'):
+                # input symbols must be integer
+                return False
+
+            if len(symbols) == 1:
+                # input too short
+                return False
+
+            if np.any(symbols < 0):
+                # input contains negative intiger
+                return False
 
         return True
 
@@ -1665,7 +1741,9 @@ class ExponentialHMM(_BaseHMM):
         obs : list
             List of array-like observation sequences, each of which
             has shape (n_i, n_features), where n_i is the length of
-            the i_th observation.
+            the i_th observation. Alternatively, a list of strings,
+            each of which is a filepath to a pickled object, being
+            a list of array-like observation sequences.
 
         Notes
         -----
@@ -1751,7 +1829,7 @@ class GMMHMM(_BaseHMM):
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
                  verbose=0, means_var=1.0,
-                 n_jobs=1, batch_size=1):
+                 n_jobs=1, batch_size=1, memory_safe=False):
         """Create a hidden Markov model with GMM emissions.
 
         Parameters
@@ -1770,7 +1848,8 @@ class GMMHMM(_BaseHMM):
                           init_params=init_params,
                           verbose=verbose,
                           n_jobs=n_jobs,
-                          batch_size=batch_size)
+                          batch_size=batch_size,
+                          memory_safe=memory_safe)
 
         # XXX: Hotfit for n_mix that is incompatible with the scikit's
         # BaseEstimator API
@@ -1807,12 +1886,15 @@ class GMMHMM(_BaseHMM):
     def _init(self, obs, params='stwmc'):
         super(GMMHMM, self)._init(obs, params=params)
 
-        allobs = np.concatenate(obs, 0)
-        n_features = allobs.shape[1]
+        if self.memory_safe:
+            concat_obs = np.concatenate(cPickle.load(open(obs[0], 'r')), 0)
+        else:
+            concat_obs = np.concatenate(obs, 0)
+        n_features = concat_obs.shape[1]
 
         for g in self.gmms_:
             g.set_params(init_params=params, n_iter=0)
-            g.fit(allobs)
+            g.fit(concat_obs)
             means = np.array([multivariate_normal(
                 mean,
                 np.eye(n_features) * self.means_var)
