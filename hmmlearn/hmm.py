@@ -279,6 +279,45 @@ class _BaseHMM(BaseEstimator):
         logprob, _ = self._do_forward_pass(framelogprob)
         return logprob
 
+    def aic(self, obs):
+        """Computes the Aikaike Information Criterion of the model and
+        set of observations.
+
+        Parameters
+        ----------
+        obs : list of arrays
+            List of observation sequences.
+
+        Returns
+        -------
+        aic_score : float
+            The Aikaike Information Criterion.
+        """
+        logprob = sum([self.score(seq) for seq in obs])
+        n_pars = self._n_free_parameters()
+        aic_score = 2 * n_pars - 2 * logprob
+        return aic_score
+
+    def bic(self, obs):
+        """Computes the Aikaike Information Criterion of the model and
+        set of observations.
+
+        Parameters
+        ----------
+        obs : list of arrays
+            List of observation sequences.
+
+        Returns
+        -------
+        bic_score : float
+            The Aikaike Information Criterion.
+        """
+        logprob = sum([self.score(seq) for seq in obs])
+        n_pars = self._n_free_parameters()
+        n_data = sum([len(seq) for seq in obs])
+        bic_score = n_pars * (np.log(n_data) - np.log(2 * np.pi)) - 2 * logprob
+        return bic_score
+
     def _decode_viterbi(self, obs):
         """Find most likely state sequence corresponding to ``obs``.
 
@@ -656,6 +695,9 @@ class _BaseHMM(BaseEstimator):
         if 't' in params:
             self.transmat_ = normalize(np.maximum(stats['trans'], 1e-20), 1)
 
+    def _n_free_parameters(self):
+        pass
+
 
 class GaussianHMM(_BaseHMM):
     """Hidden Markov Model with Gaussian emissions
@@ -926,6 +968,19 @@ class GaussianHMM(_BaseHMM):
                     self._covars_ = ((covars_prior + cvnum) /
                                      (cvweight + stats['post'][:, None, None]))
 
+    def _n_free_parameters(self):
+        n_pars = (self.n_states - 1) * (self.n_states + 1)
+        n_pars += self.n_states * self.n_features
+        if self._covariance_type == 'spherical':
+            n_pars += self.n_states
+        elif self._covariance_type == 'tied':
+            n_pars += ((self.n_features + 1) * self.n_features) / 2
+        elif self._covariance_type == 'diag':
+            n_pars  += self.n_states * self.n_features
+        elif self._covariance_type == 'full':
+            n_pars += self.n_states * ((self.n_features + 1) * self.n_features) / 2
+        return n_pars
+
     def fit(self, obs):
         """Estimate model parameters.
 
@@ -1134,6 +1189,11 @@ class MultinomialHMM(_BaseHMM):
 
         return True
 
+    def _n_free_parameters(self):
+        n_pars = (self.n_states - 1) * (self.n_states + 1)
+        n_pars += self.n_states * (self.n_symbols - 1)
+        return n_pars
+
     def fit(self, obs, **kwargs):
         """Estimate model parameters.
 
@@ -1309,6 +1369,11 @@ class PoissonHMM(_BaseHMM):
             return False
 
         return True
+
+    def _n_free_parameters(self):
+        n_pars = (self.n_states - 1) * (self.n_states + 1)
+        n_pars += self.n_states
+        return n_pars
 
     def fit(self, obs):
         """Estimate model parameters.
@@ -1492,6 +1557,11 @@ class ExponentialHMM(_BaseHMM):
             return False
 
         return True
+
+    def _n_free_parameters(self):
+        n_pars = (self.n_states - 1) * (self.n_states + 1)
+        n_pars += self.n_states
+        return n_pars
 
     def fit(self, obs):
         """Estimate model parameters.
@@ -1730,3 +1800,20 @@ class GMMHMM(_BaseHMM):
                         g.covars_ = ((stats['covars'][state]
                                      + self.covars_prior * eye[np.newaxis])
                                      / cvnorm)
+
+    def _n_free_parameters(self):
+        n_pars = (self.n_states - 1) * (self.n_states + 1)
+        for g in self.gmms_:
+            n_components = g.means_.shape[0]
+            n_features = g.means_.shape[1]
+            n_pars += n_components - 1
+            n_pars += n_components * n_features
+            if g.covariance_type == 'spherical':
+                n_pars += n_components
+            elif g.covariance_type == 'tied':
+                n_pars += ((n_features + 1) * n_features) / 2
+            elif g.covariance_type == 'diag':
+                n_pars  += n_components * n_features
+            elif g.covariance_type == 'full':
+                n_pars += n_components * ((n_features + 1) * n_features) / 2
+        return n_pars

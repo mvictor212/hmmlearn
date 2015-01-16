@@ -163,7 +163,7 @@ class _BaseMixHMM(BaseEstimator):
             posteriors += self._log_component_weights
             logprob[i] = logsumexp(posteriors)
             responsibilities[i, :] = log_normalize(posteriors, 0)
-        return logprob, responsibilities
+        return sum(logprob), responsibilities
 
     def score(self, obs):
         """Compute the log probability under the model.
@@ -192,7 +192,46 @@ class _BaseMixHMM(BaseEstimator):
                 for k in range(self.n_components)])
             curr_logprob += self._log_component_weights
             logprob[i] = logsumexp(curr_logprob)
-        return logprob
+        return sum(logprob)
+
+    def aic(self, obs):
+        """Computes the Aikaike Information Criterion of the model and
+        set of observations.
+
+        Parameters
+        ----------
+        obs : list of arrays
+            List of observation sequences.
+
+        Returns
+        -------
+        aic_score : float
+            The Aikaike Information Criterion.
+        """
+        logprob = self.score(obs)
+        n_pars = self._n_free_parameters()
+        aic_score = 2 * n_pars - 2 * logprob
+        return aic_score
+
+    def bic(self, obs):
+        """Computes the Aikaike Information Criterion of the model and
+        set of observations.
+
+        Parameters
+        ----------
+        obs : list of arrays
+            List of observation sequences.
+
+        Returns
+        -------
+        bic_score : float
+            The Aikaike Information Criterion.
+        """
+        logprob = self.score(obs)
+        n_pars = self._n_free_parameters()
+        n_data = sum([len(seq) for seq in obs])
+        bic_score = n_pars * (np.log(n_data) - np.log(2 * np.pi)) - 2 * logprob
+        return bic_score
 
     def predict(self, obs):
         """Predict component label for observation sequences.
@@ -439,6 +478,9 @@ class _BaseMixHMM(BaseEstimator):
             for k, hmm in enumerate(self.hmms):
                 hmm._do_mstep(stats['hmm_stats'][k], hmm.params)
 
+    def _n_free_parameters(self):
+        pass
+
 
 class MultinomialMixHMM(_BaseMixHMM):
     """Mixture of Hidden Markov Models with multinomial (discrete) emissions
@@ -605,6 +647,15 @@ class MultinomialMixHMM(_BaseMixHMM):
             return False
 
         return True
+
+    def _n_free_parameters(self):
+        n_pars = self.n_components - 1
+        for hmm in self.hmms:
+            n_pars += hmm._n_free_parameters()
+        if self.tied:
+            n_pars -= (self.n_components - 1) * \
+                (self.hmms[0].n_states * (self.hmms[0].n_symbols - 1))
+        return n_pars
 
     def fit(self, obs, **kwargs):
         """Estimate model parameters.
@@ -792,6 +843,14 @@ class PoissonMixHMM(_BaseMixHMM):
 
         return True
 
+    def _n_free_parameters(self):
+        n_pars = self.n_components - 1
+        for hmm in self.hmms:
+            n_pars += hmm._n_free_parameters()
+        if self.tied:
+            n_pars -= (self.n_components - 1) * self.hmms[0].n_states
+        return n_pars
+
     def fit(self, obs, **kwargs):
         """Estimate model parameters.
 
@@ -977,6 +1036,14 @@ class ExponentialMixHMM(_BaseMixHMM):
             return False
 
         return True
+
+    def _n_free_parameters(self):
+        n_pars = self.n_components - 1
+        for hmm in self.hmms:
+            n_pars += hmm._n_free_parameters()
+        if self.tied:
+            n_pars -= (self.n_components - 1) * self.hmms[0].n_states
+        return n_pars
 
     def fit(self, obs, **kwargs):
         """Estimate model parameters.
@@ -1194,3 +1261,25 @@ class GaussianMixHMM(_BaseMixHMM):
             the i_th observation.
         """
         return _BaseMixHMM.fit(self, obs, **kwargs)
+
+    def _n_free_parameters(self):
+        n_pars = self.n_components - 1
+        for hmm in self.hmms:
+            n_pars += hmm._n_free_parameters()
+        if self.tied:
+            covar_type = self.hmms[0]._covariance_type
+            if covar_type == 'spherical':
+                n_covar_pars = self.hmms[0].n_states
+            elif covar_type == 'tied':
+                n_covar_pars = ((self.hmms[0].n_features + 1) *
+                                self.hmms[0].n_features) / 2
+            elif covar_type == 'diag':
+                n_covar_pars = self.hmms[0].n_states * self.hmms[0].n_features
+            elif covar_type == 'full':
+                n_covar_pars = self.hmms[0].n_states * \
+                    ((self.hmms[0].n_features + 1) *
+                     self.hmms[0].n_features) / 2
+            n_pars -= (self.n_components - 1) * \
+                (self.hmms[0].n_states * self.hmms[0].n_features +
+                 n_covar_pars)
+        return n_pars
