@@ -313,11 +313,13 @@ class _BaseMixHMM(BaseEstimator):
             components.append(currcomponent)
 
             n = np.random.randint(n_min, n_max)
-            obs_seq, state_seq = self.hmms[currcomponent].sample(n,
+            obs_seq, state_seq = self.hmms[currcomponent].sample(n_seq=1,
+                                                                 n_min=n,
+                                                                 n_max=(n + 1),
                                                                  random_state)
 
-            obs.append(deepcopy(obs_seq))
-            states.append(deepcopy(state_seq))
+            obs.append(deepcopy(obs_seq[0]))
+            states.append(deepcopy(state_seq[0]))
 
         return np.array(components), obs, states
 

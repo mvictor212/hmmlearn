@@ -23,6 +23,7 @@ from sklearn.mixture import (
     distribute_covar_matrix_to_match_covariance_type, _validate_covars)
 from sklearn import cluster
 from scipy.stats import (poisson, expon)
+from copy import deepcopy
 
 from .utils.fixes import (log_multivariate_normal_density,
                           log_poisson_pmf, log_exponential_density)
@@ -256,7 +257,7 @@ class _BaseHMM(BaseEstimator):
         logprob : float
             Log likelihood of the sequence ``obs``.
 
-        posteriors : array_like, shape (n, n_states)
+        posteriors : list of array_like, shape (n, n_states)
             Posterior probabilities of each state for each
             observation
 
@@ -265,18 +266,22 @@ class _BaseHMM(BaseEstimator):
         score : Compute the log probability under the model
         decode : Find most likely state sequence corresponding to a `obs`
         """
-        obs = np.asarray(obs)
-        framelogprob = self._compute_log_likelihood(obs)
-        logprob, fwdlattice = self._do_forward_pass(framelogprob)
-        bwdlattice = self._do_backward_pass(framelogprob)
-        gamma = fwdlattice + bwdlattice
-        # gamma is guaranteed to be correctly normalized by logprob at
-        # all frames, unless we do approximate inference using pruning.
-        # So, we will normalize each frame explicitly in case we
-        # pruned too aggressively.
-        posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
-        posteriors += np.finfo(np.float32).eps
-        posteriors /= np.sum(posteriors, axis=1).reshape((-1, 1))
+        logprob = 0
+        posteriors = []
+        for seq in obs:
+            seq = np.asarray(seq)
+            framelogprob = self._compute_log_likelihood(seql)
+            lpr, fwdlattice = self._do_forward_pass(framelogprob)
+            bwdlattice = self._do_backward_pass(framelogprob)
+            gamma = fwdlattice + bwdlattice
+            # gamma is guaranteed to be correctly normalized by logprob at
+            # all frames, unless we do approximate inference using pruning.
+            # So, we will normalize each frame explicitly in case we
+            # pruned too aggressively.
+            posteriors.append(np.exp(gamma.T - logsumexp(gamma, axis=1)).T)
+            posteriors[-1] += np.finfo(np.float32).eps
+            posteriors[-1] /= np.sum(posteriors, axis=1).reshape((-1, 1))
+            logprob += lpr
         return logprob, posteriors
 
     def score(self, obs):
@@ -284,7 +289,7 @@ class _BaseHMM(BaseEstimator):
 
         Parameters
         ----------
-        obs : array_like, shape (n, n_features)
+        obs : list of array_like, shape (n, n_features)
             Sequence of n_features-dimensional data points.  Each row
             corresponds to a single data point.
 
@@ -300,9 +305,12 @@ class _BaseHMM(BaseEstimator):
 
         decode : Find most likely state sequence corresponding to a `obs`
         """
-        obs = np.asarray(obs)
-        framelogprob = self._compute_log_likelihood(obs)
-        logprob, _ = self._do_forward_pass(framelogprob)
+        logprob = 0
+        for seq in obs:
+            seq = np.asarray(seq)
+            framelogprob = self._compute_log_likelihood(seq)
+            lpr, _ = self._do_forward_pass(framelogprob)
+            logprob += lpr
         return logprob
 
     def aic(self, obs):
@@ -319,7 +327,7 @@ class _BaseHMM(BaseEstimator):
         aic_score : float
             The Aikaike Information Criterion.
         """
-        logprob = sum([self.score(seq) for seq in obs])
+        logprob = self.score(obs)
         n_pars = self._n_free_parameters()
         aic_score = 2 * n_pars - 2 * logprob
         return aic_score
@@ -338,7 +346,7 @@ class _BaseHMM(BaseEstimator):
         bic_score : float
             The Aikaike Information Criterion.
         """
-        logprob = sum([self.score(seq) for seq in obs])
+        logprob = self.score(obs)
         n_pars = self._n_free_parameters()
         n_data = sum([len(seq) for seq in obs])
         bic_score = n_pars * (np.log(n_data) - np.log(2 * np.pi)) - 2 * logprob
@@ -357,10 +365,10 @@ class _BaseHMM(BaseEstimator):
 
         Returns
         -------
-        viterbi_logprob : float
+        viterbi_logprobs : array_like, shape (n,)
             Log probability of the maximum likelihood path through the HMM.
 
-        state_sequence : array_like, shape (n,)
+        state_sequences : list of array_like, shape (n,)
             Index of the most likely states for each observation.
 
         See Also
@@ -370,10 +378,14 @@ class _BaseHMM(BaseEstimator):
 
         score : Compute the log probability under the model
         """
-        obs = np.asarray(obs)
-        framelogprob = self._compute_log_likelihood(obs)
-        viterbi_logprob, state_sequence = self._do_viterbi_pass(framelogprob)
-        return viterbi_logprob, state_sequence
+        viterbi_logprobs = np.zeros(len(obs))
+        state_sequences = []
+        for n, seq in enumerate(obs):
+            seq = np.asarray(seq)
+            framelogprob = self._compute_log_likelihood(seq)
+            viterbi_logprobs[n], state_sequence = self._do_viterbi_pass(framelogprob)
+            state_sequences.append(state_sequence)
+        return viterbi_logprobs, state_sequences
 
     def _decode_map(self, obs):
         """Find most likely state sequence corresponding to `obs`.
@@ -382,15 +394,15 @@ class _BaseHMM(BaseEstimator):
 
         Parameters
         ----------
-        obs : array_like, shape (n, n_features)
+        obs : list of array_like, shape (n, n_features)
             Sequence of n_features-dimensional data points. Each row
             corresponds to a single point in the sequence.
 
         Returns
         -------
-        map_logprob : float
+        map_logprobs : array_like, shape (n,)
             Log probability of the maximum likelihood path through the HMM
-        state_sequence : array_like, shape (n,)
+        state_sequences : list of array_like, shape (n,)
             Index of the most likely states for each observation
 
         See Also
@@ -399,10 +411,13 @@ class _BaseHMM(BaseEstimator):
             posteriors.
         score : Compute the log probability under the model.
         """
+        map_logprobs = np.zeros(len(obs))
+        state_sequences = []
         _, posteriors = self.score_samples(obs)
-        state_sequence = np.argmax(posteriors, axis=1)
-        map_logprob = np.max(posteriors, axis=1).sum()
-        return map_logprob, state_sequence
+        for n, post in enumerate(posteriors):
+            state_sequences.append(np.argmax(post, axis=1))
+            map_logprobs[n] = np.max(post, axis=1).sum()
+        return map_logprobs, state_sequences
 
     def decode(self, obs, algorithm="viterbi"):
         """Find most likely state sequence corresponding to ``obs``.
@@ -419,10 +434,10 @@ class _BaseHMM(BaseEstimator):
 
         Returns
         -------
-        logprob : float
+        logprobs : array_like, shape (n,)
             Log probability of the maximum likelihood path through the HMM
 
-        state_sequence : array_like, shape (n,)
+        state_sequences : list of array_like, shape (n,)
             Index of the most likely states for each observation
 
         See Also
@@ -438,8 +453,8 @@ class _BaseHMM(BaseEstimator):
             algorithm = algorithm
         decoder = {"viterbi": self._decode_viterbi,
                    "map": self._decode_map}
-        logprob, state_sequence = decoder[algorithm](obs)
-        return logprob, state_sequence
+        logprobs, state_sequences = decoder[algorithm](obs)
+        return logprobs, state_sequences
 
     def predict(self, obs, algorithm="viterbi"):
         """Find most likely state sequence corresponding to `obs`.
@@ -452,11 +467,11 @@ class _BaseHMM(BaseEstimator):
 
         Returns
         -------
-        state_sequence : array_like, shape (n,)
+        state_sequences : list of array_like, shape (n,)
             Index of the most likely states for each observation
         """
-        _, state_sequence = self.decode(obs, algorithm)
-        return state_sequence
+        _, state_sequences = self.decode(obs, algorithm)
+        return state_sequences
 
     def predict_proba(self, obs):
         """Compute the posterior probability for each state in the model
@@ -469,19 +484,25 @@ class _BaseHMM(BaseEstimator):
 
         Returns
         -------
-        T : array-like, shape (n, n_states)
+        posteriors : list of array-like, shape (n, n_states)
             Returns the probability of the sample for each state in the model.
         """
         _, posteriors = self.score_samples(obs)
         return posteriors
 
-    def sample(self, n=1, random_state=None):
+    def sample(self, n_seq=1, n_min=10, n_max=20, random_state=None):
         """Generate random samples from the model.
 
         Parameters
         ----------
-        n : int
-            Number of samples to generate.
+        n_seq : int
+            Number of observation sequences to generate.
+
+        n_min : int
+            Minimum number of observations for a sequence.
+
+        n_max : int
+            Maximum number of observations for a sequence.
 
         random_state: RandomState or an int seed (0 by default)
             A random number generator instance. If None is given, the
@@ -490,8 +511,8 @@ class _BaseHMM(BaseEstimator):
         Returns
         -------
         (obs, hidden_states)
-        obs : array_like, length `n` List of samples
-        hidden_states : array_like, length `n` List of hidden states
+        obs : list of array_like, length `n_seq` List of samples
+        states : list of array_like, length `n_seq` List of hidden states
         """
         if random_state is None:
             random_state = self.random_state
@@ -502,21 +523,29 @@ class _BaseHMM(BaseEstimator):
         transmat_pdf = self.transmat_
         transmat_cdf = np.cumsum(transmat_pdf, 1)
 
-        # Initial state.
-        rand = random_state.rand()
-        currstate = (startprob_cdf > rand).argmax()
-        hidden_states = [currstate]
-        obs = [self._generate_sample_from_state(
-            currstate, random_state=random_state)]
+        obs = []
+        states = []
 
-        for _ in range(n - 1):
+        for _ in range(n_seq):
+            n = np.random.randint(n_min, n_max, size=1)
+            # Initial state.
             rand = random_state.rand()
-            currstate = (transmat_cdf[currstate] > rand).argmax()
-            hidden_states.append(currstate)
-            obs.append(self._generate_sample_from_state(
-                currstate, random_state=random_state))
+            currstate = (startprob_cdf > rand).argmax()
+            state_seq = [currstate]
+            obs_seq = [self._generate_sample_from_state(
+                currstate, random_state=random_state)]
 
-        return np.array(obs), np.array(hidden_states, dtype=int)
+            for _ in range(n - 1):
+                rand = random_state.rand()
+                currstate = (transmat_cdf[currstate] > rand).argmax()
+                state_seq.append(currstate)
+                obs_seq.append(self._generate_sample_from_state(
+                    currstate, random_state=random_state))
+
+            obs.append(deepcopy(np.array(obs_seq)))
+            states.append(deepcopy(np.array(state_seq, dtype=int)))
+
+        return obs, states
 
     def fit(self, obs):
         """Estimate model parameters.
