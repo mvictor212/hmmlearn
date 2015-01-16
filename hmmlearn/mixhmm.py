@@ -118,7 +118,7 @@ class _BaseMixHMM(BaseEstimator):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters, verbose=0,
-                 tied=True, n_jobs=1, batch_size=1):
+                 tied=True, n_jobs=1, batch_size=1, memory_safe=False):
 
         self.n_components = n_components
         self.n_states = n_states
@@ -136,6 +136,7 @@ class _BaseMixHMM(BaseEstimator):
         self.tied = tied
         self.n_jobs = n_jobs
         self.batch_size = batch_size
+        self.memory_safe = memory_safe
 
     def score_samples(self, obs):
         """Return the per-sequence likelihood of the data under the model.
@@ -347,6 +348,10 @@ class _BaseMixHMM(BaseEstimator):
         parameter.
         """
 
+        if self.memory_safe and (not isinstance(obs[0], str)):
+            raise ValueError("Filepath locations must be provided as \
+                             observations to be memory safe.")
+
         n_batches = (len(obs) // self.batch_size) + \
             (1 if len(obs) % self.batch_size else 0)
 
@@ -485,9 +490,16 @@ class _BaseMixHMM(BaseEstimator):
         return stats
 
     def _do_estep(self, obs_batch):
+        if self.memory_safe:
+            local_obs = reduce(lambda x, y: x + y,
+                               [cPickle.load(open(filename, 'r'))
+                                for filename in obs_batch],
+                               [])
+        else:
+            local_obs = obs_batch
         local_stats = self._initialize_sufficient_statistics()
         local_logprob = 0
-        for n, seq in enumerate(obs_batch):
+        for n, seq in enumerate(local_obs):
             curr_logprob = np.zeros(self.n_components)
             local_inner_stats = self._initialize_inner_sufficient_statistics()
             framelogprob = self._compute_log_likelihood(seq)
@@ -505,6 +517,8 @@ class _BaseMixHMM(BaseEstimator):
             self._accumulate_sufficient_statistics(
                 local_stats, local_inner_stats, self.params)
             local_logprob += logsumexp(curr_logprob)
+        if self.memory_safe:
+            local_obs = None
         return local_stats, local_logprob
 
     def _do_mstep(self, stats, params):
@@ -593,7 +607,7 @@ class MultinomialMixHMM(_BaseMixHMM):
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
                  verbose=0, emissionprob_prior=None, tied=True,
-                 n_jobs=1, batch_size=1):
+                 n_jobs=1, batch_size=1, memory_safe=False):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -612,7 +626,8 @@ class MultinomialMixHMM(_BaseMixHMM):
                              verbose=verbose,
                              tied=tied,
                              n_jobs=n_jobs,
-                             batch_size=batch_size)
+                             batch_size=batch_size,
+                             memory_safe=memory_safe)
         self.emissionprob_prior = emissionprob_prior
 
     def _init(self, obs, params='ph'):
@@ -622,7 +637,8 @@ class MultinomialMixHMM(_BaseMixHMM):
         if ('h' in params) and (self.hmms is None):
             self.hmms = [MultinomialHMM(
                 self.n_states,
-                emissionprob_prior=self.emissionprob_prior)
+                emissionprob_prior=self.emissionprob_prior,
+                memory_safe=self.memory_safe)
                 for _ in range(self.n_components)]
             self.hmms[0]._init(obs)
             emissionprob = self.hmms[0].emissionprob_
@@ -800,7 +816,7 @@ class PoissonMixHMM(_BaseMixHMM):
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
                  verbose=0, rates_var=1.0, tied=True,
-                 n_jobs=1, batch_size=1):
+                 n_jobs=1, batch_size=1, memory_safe=False):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -819,7 +835,8 @@ class PoissonMixHMM(_BaseMixHMM):
                              verbose=verbose,
                              tied=tied,
                              n_jobs=n_jobs,
-                             batch_size=batch_size)
+                             batch_size=batch_size,
+                             memory_safe=memory_safe)
         self.rates_var = rates_var
 
     def _init(self, obs, params='ph'):
@@ -827,7 +844,9 @@ class PoissonMixHMM(_BaseMixHMM):
         self.random_state = check_random_state(self.random_state)
 
         if ('h' in params) and (self.hmms is None):
-            self.hmms = [PoissonHMM(self.n_states, rates_var=self.rates_var)
+            self.hmms = [PoissonHMM(self.n_states,
+                                    rates_var=self.rates_var,
+                                    memory_safe=self.memory_safe)
                          for _ in range(self.n_components)]
             self.hmms[0]._init(obs)
             rates = self.hmms[0].rates_
@@ -1006,7 +1025,7 @@ class ExponentialMixHMM(_BaseMixHMM):
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
                  verbose=0, rates_var=1.0, tied=True,
-                 n_jobs=1, batch_size=1):
+                 n_jobs=1, batch_size=1, memory_safe=False):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1025,7 +1044,8 @@ class ExponentialMixHMM(_BaseMixHMM):
                              verbose=verbose,
                              tied=tied,
                              n_jobs=n_jobs,
-                             batch_size=batch_size)
+                             batch_size=batch_size,
+                             memory_safe=memory_safe)
         self.rates_var = rates_var
 
     def _init(self, obs, params='ph'):
@@ -1034,7 +1054,8 @@ class ExponentialMixHMM(_BaseMixHMM):
 
         if ('h' in params) and (self.hmms is None):
             self.hmms = [ExponentialHMM(self.n_states,
-                                        rates_var=self.rates_var)
+                                        rates_var=self.rates_var,
+                                        memory_safe=self.memory_safe)
                          for _ in range(self.n_components)]
             self.hmms[0]._init(obs)
             rates = self.hmms[0].rates_
@@ -1216,7 +1237,7 @@ class GaussianMixHMM(_BaseMixHMM):
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
                  verbose=0, means_var=1.0, tied=True,
-                 n_jobs=1, batch_size=1):
+                 n_jobs=1, batch_size=1, memory_safe=False):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1235,7 +1256,8 @@ class GaussianMixHMM(_BaseMixHMM):
                              verbose=verbose,
                              tied=tied,
                              n_jobs=n_jobs,
-                             batch_size=batch_size)
+                             batch_size=batch_size,
+                             memory_safe=memory_safe)
         self.means_var = means_var
 
     def _init(self, obs, params='ph'):
@@ -1243,7 +1265,9 @@ class GaussianMixHMM(_BaseMixHMM):
         self.random_state = check_random_state(self.random_state)
 
         if ('h' in params) and (self.hmms is None):
-            self.hmms = [GaussianHMM(self.n_states, means_var=self.means_var)
+            self.hmms = [GaussianHMM(self.n_states,
+                                     means_var=self.means_var,
+                                     memory_safe=self.memory_safe)
                          for _ in range(self.n_components)]
             self.hmms[0]._init(obs)
             means = self.hmms[0].means_
