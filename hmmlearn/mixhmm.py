@@ -8,6 +8,7 @@ hidden Markov models.
 """
 
 import string
+import cPickle
 
 import numpy as np
 import multiprocessing as mp
@@ -698,7 +699,13 @@ class MultinomialMixHMM(_BaseMixHMM):
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, 0, 3, 5, 10] not
         """
 
-        symbols = np.concatenate(obs)
+        if self.memory_safe:
+            symbols = []
+            for o in obs:
+                symbols += cPickle.load(open(o, 'r'))
+            symbols = np.concatenate(symbols)
+        else:
+            symbols = np.concatenate(obs)
 
         if symbols.dtype.kind != 'i':
             # input symbols must be integer
@@ -913,20 +920,34 @@ class PoissonMixHMM(_BaseMixHMM):
         of non-negative integers.
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, -1, 3, 5, 10] not
         """
-        symbols = reduce(lambda x, y: np.concatenate([x, y]),
-                         obs)
+        if self.memory_safe:
+            for o in obs:
+                symbols = np.concatenate(cPickle.load(open(o, 'r')))
 
-        if symbols.dtype.kind != 'i':
-            # input symbols must be integer
-            return False
+                if symbols.dtype.kind != 'i':
+                    # input symbols must be integer
+                    return False
 
-        if len(symbols) == 1:
-            # input too short
-            return False
+                if len(symbols) == 1:
+                    # input too short
+                    return False
 
-        if np.any(symbols < 0):
-            # input contains negative intiger
-            return False
+                if np.any(symbols < 0):
+                    # input contains negative intiger
+                    return False
+        else:
+            symbols = np.concatenate(obs)
+            if symbols.dtype.kind != 'i':
+                # input symbols must be integer
+                return False
+
+            if len(symbols) == 1:
+                # input too short
+                return False
+
+            if np.any(symbols < 0):
+                # input contains negative intiger
+                return False
 
         return True
 
@@ -1122,20 +1143,35 @@ class ExponentialMixHMM(_BaseMixHMM):
         of non-negative reals.
         e.g. x = [0., 0.5, 2.3] is OK and y = [0.0, -1.0, 3.3, 5.4, 10.9] not
         """
-        symbols = reduce(lambda x, y: np.concatenate([x, y]),
-                         obs)
 
-        if symbols.dtype.kind not in ('f', 'i'):
-            # input symbols must be real
-            return False
+        if self.memory_safe:
+            for o in obs:
+                symbols = np.concatenate(cPickle.load(open(o, 'r')))
 
-        if len(symbols) == 1:
-            # input too short
-            return False
+                if symbols.dtype.kind not in ('f', 'i'):
+                    # input symbols must be integer
+                    return False
 
-        if np.any(symbols < 0):
-            # input contains negative intiger
-            return False
+                if len(symbols) == 1:
+                    # input too short
+                    return False
+
+                if np.any(symbols < 0):
+                    # input contains negative intiger
+                    return False
+        else:
+            symbols = np.concatenate(obs)
+            if symbols.dtype.kind not in ('f', 'i'):
+                # input symbols must be integer
+                return False
+
+            if len(symbols) == 1:
+                # input too short
+                return False
+
+            if np.any(symbols < 0):
+                # input contains negative intiger
+                return False
 
         return True
 
