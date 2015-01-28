@@ -1762,6 +1762,300 @@ class ExponentialHMM(_BaseHMM):
         return super(ExponentialHMM, self).fit(obs)
 
 
+class MultinomialExponentialHMM(_BaseHMM):
+    """Hidden Markov Model with joint multinomial and exponential emissions
+
+    Attributes
+    ----------
+    n_states : int
+        Number of states in the model.
+
+    n_symbols : int
+        Number of possible symbols emitted by the model (in the observations).
+
+    transmat : array, shape (`n_states`, `n_states`)
+        Matrix of transition probabilities between states.
+
+    startprob : array, shape ('n_states`,)
+        Initial state occupation distribution.
+
+    emissionprob : array, shape ('n_states`, 'n_symbols`)
+        Probability of emitting a given symbol when in each state.
+
+    rates : array, shape ('n_states`,)
+        Exponential rate parameters for each state.
+
+    random_state: RandomState or an int seed (0 by default)
+        A random number generator instance
+
+    n_iter : int, optional
+        Number of iterations to perform.
+
+    thresh : float, optional
+        Convergence threshold.
+
+    params : string, optional
+        Controls which parameters are updated in the training
+        process.  Can contain any combination of 's' for startprob,
+        't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    init_params : string, optional
+        Controls which parameters are initialized prior to
+        training.  Can contain any combination of 's' for
+        startprob, 't' for transmat, 'e' for emmissionprob.
+        Defaults to all parameters.
+
+    verbose : int, default: 0
+        Enable verbose output. If 1 then it prints progress and performance
+        once in a while (the more iterations the lower the frequency). If
+        greater than 1 then it prints progress and performance for every
+        iteration.
+
+    Examples
+    --------
+    >>> from hmmlearn.hmm import MultinomialHMM
+    >>> MultinomialHMM(n_states=2)
+    ...                             #doctest: +ELLIPSIS +NORMALIZE_WHITESPACE
+    MultinomialHMM(algorithm='viterbi',...
+
+    See Also
+    --------
+    GaussianHMM : HMM with Gaussian emissions
+    """
+
+    def __init__(self, n_states=1, startprob=None, transmat=None,
+                 startprob_prior=None, transmat_prior=None,
+                 emissionprob_prior=None, rates_var=1.0, algorithm="viterbi",
+                 random_state=None, n_iter=10, thresh=1e-2,
+                 params=string.ascii_letters, init_params=string.ascii_letters,
+                 verbose=0, n_jobs=1, batch_size=1, memory_safe=False):
+        """Create a hidden Markov model with multinomial emissions.
+
+        Parameters
+        ----------
+        n_states : int
+            Number of states.
+        """
+        _BaseHMM.__init__(self, n_states, startprob, transmat,
+                          startprob_prior=startprob_prior,
+                          transmat_prior=transmat_prior,
+                          algorithm=algorithm,
+                          random_state=random_state,
+                          n_iter=n_iter,
+                          thresh=thresh,
+                          params=params,
+                          init_params=init_params,
+                          verbose=verbose,
+                          n_jobs=n_jobs,
+                          batch_size=batch_size,
+                          memory_safe=memory_safe)
+
+        self.emissionprob_prior = emissionprob_prior
+        self.rates_var = rates_var
+
+    def _get_emissionprob(self):
+        """Emission probability distribution for each state."""
+        return np.exp(self._log_emissionprob)
+
+    def _set_emissionprob(self, emissionprob):
+        emissionprob = np.asarray(emissionprob)
+        if hasattr(self, 'n_symbols') and \
+                emissionprob.shape != (self.n_states, self.n_symbols):
+            raise ValueError('emissionprob must have shape '
+                             '(n_states, n_symbols)')
+
+        # check if there exists a component whose value is exactly zero
+        # if so, add a small number and re-normalize
+        if not np.alltrue(emissionprob):
+            normalize(emissionprob)
+
+        self._log_emissionprob = np.log(emissionprob)
+        underflow_idx = np.isnan(self._log_emissionprob)
+        self._log_emissionprob[underflow_idx] = NEGINF
+        self.n_symbols = self._log_emissionprob.shape[1]
+
+    emissionprob_ = property(_get_emissionprob, _set_emissionprob)
+
+    def _get_rates(self):
+        """Emission rate for each state."""
+        return self._rates
+
+    def _set_rates(self, rates):
+        rates = np.asarray(rates)
+        self._rates = rates.copy()
+
+    rates_ = property(_get_rates, _set_rates)
+
+    def _compute_log_likelihood(self, obs):
+        return self._log_emissionprob[:, map(int, obs[:, 0])].T + \
+            log_exponential_density(obs[:, 1], self._rates)
+
+    def _generate_sample_from_state(self, state, random_state=None):
+        cdf = np.cumsum(self.emissionprob_[state, :])
+        random_state = check_random_state(random_state)
+        rand = random_state.rand()
+        symbol = (cdf > rand).argmax()
+        expon_obs = expon.rvs(scale=1. / self._rates[state])
+        return symbol, expon_obs
+
+    def _init(self, obs, params='ste'):
+        super(MultinomialExponentialHMM, self)._init(obs, params=params)
+        self.random_state = check_random_state(self.random_state)
+
+        if 'e' in params:
+            if not hasattr(self, 'n_symbols'):
+                symbols = set()
+                for o in obs:
+                    if self.memory_safe:
+                        symbols = symbols.union(set(np.concatenate(
+                            cPickle.load(open(o, 'r')))[:, 0]))
+                    else:
+                        symbols = symbols.union(set(o[:, 0]))
+                self.n_symbols = len(symbols)
+            if self.emissionprob_prior is None:
+                self.emissionprob_prior = np.ones((self.n_states,
+                                                   self.n_symbols))
+            emissionprob = np.vstack([np.random.dirichlet(
+                self.emissionprob_prior[i])
+                for i in xrange(self.n_states)])
+            self.emissionprob_ = emissionprob
+
+        if self.memory_safe:
+            concat_obs = np.concatenate(cPickle.load(open(obs[0], 'r')))[:, 1]
+        else:
+            concat_obs = np.concatenate(obs)[:, 1]
+        if 'r' in params:
+            clu = cluster.KMeans(n_clusters=self.n_states).fit(
+                np.atleast_2d(concat_obs).T)
+            rates = normal(0, self.rates_var, self.n_states) + \
+                1. / clu.cluster_centers_.T[0]
+            self._rates = np.maximum(0.1, rates)
+
+    def _initialize_sufficient_statistics(self):
+        stats = super(MultinomialExponentialHMM, self)._initialize_sufficient_statistics()
+        stats['obs'] = np.zeros((self.n_states, self.n_symbols))
+        stats['post'] = np.zeros(self.n_states)
+        stats['expon_obs'] = np.zeros((self.n_states,))
+        return stats
+
+    def _accumulate_sufficient_statistics(self, stats, obs, framelogprob,
+                                          posteriors, fwdlattice, bwdlattice,
+                                          params):
+        super(MultinomialExponentialHMM, self)._accumulate_sufficient_statistics(
+            stats, obs, framelogprob, posteriors, fwdlattice, bwdlattice,
+            params)
+        if 'e' in params:
+            for t, symbol in enumerate(obs[:, 0]):
+                stats['obs'][:, int(symbol)] += posteriors[t]
+        if 'r' in params:
+            stats['post'] += posteriors.sum(axis=0)
+            stats['expon_obs'] += np.dot(posteriors.T, obs[:, 1])
+
+    def _do_mstep(self, stats, params):
+        super(MultinomialExponentialHMM, self)._do_mstep(stats, params)
+        if 'e' in params:
+            self.emissionprob_ = (stats['obs']
+                                  / stats['obs'].sum(1)[:, np.newaxis])
+        if 'r' in params:
+            self._rates = stats['post'] / stats['expon_obs']
+
+    def _check_input_symbols(self, obs):
+        """check if input can be used for Multinomial.fit input must be both
+        positive integer array and every element must be continuous.
+        e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, 0, 3, 5, 10] not
+        """
+
+        if self.memory_safe:
+            symbols = []
+            for o in obs:
+                symbols += cPickle.load(open(o, 'r'))
+            symbols = np.concatenate(symbols)[:, 0]
+        else:
+            symbols = np.concatenate(obs)[:, 0]
+
+        if symbols.dtype.kind not in ('i', 'f'):
+            # input symbols must be integer
+            return False
+
+        if len(symbols) == 1:
+            # input too short
+            return False
+
+        if np.any(symbols < 0):
+            # input contains negative intiger
+            return False
+
+        symbols.sort()
+        if np.any(np.diff(symbols) > 1):
+            # input is discontinous
+            return False
+
+        if self.memory_safe:
+            for o in obs:
+                symbols = np.concatenate(cPickle.load(open(o, 'r')))[:, 1]
+
+                if symbols.dtype.kind not in ('f', 'i'):
+                    # input symbols must be integer
+                    return False
+
+                if len(symbols) == 1:
+                    # input too short
+                    return False
+
+                if np.any(symbols < 0):
+                    # input contains negative intiger
+                    return False
+        else:
+            symbols = np.concatenate(obs)[:, 1]
+            if symbols.dtype.kind not in ('f', 'i'):
+                # input symbols must be integer
+                return False
+
+            if len(symbols) == 1:
+                # input too short
+                return False
+
+            if np.any(symbols < 0):
+                # input contains negative intiger
+                return False
+
+        return True
+
+    def _n_free_parameters(self):
+        n_pars = (self.n_states - 1) * (self.n_states + 1)
+        n_pars += self.n_states * (self.n_symbols - 1)
+        n_pars += self.n_states
+        return n_pars
+
+    def fit(self, obs, **kwargs):
+        """Estimate model parameters.
+
+        An initialization step is performed before entering the EM
+        algorithm. If you want to avoid this step, pass proper
+        ``init_params`` keyword argument to estimator's constructor.
+
+        Parameters
+        ----------
+        obs : list
+            List of array-like observation sequences, each of which
+            has shape (n_i, n_features), where n_i is the length of
+            the i_th observation. Alternatively, a list of strings,
+            each of which is a filepath to a pickled object, being
+            a list of array-like observation sequences.
+        """
+        err_msg = ("Input must be a list of non-negative integer arrays where "
+                   "in all, every element must be continuous, but %s was "
+                   "given.")
+
+        cleaned_obs = [np.array(seq) for seq in obs]
+
+        if not self._check_input_symbols(cleaned_obs):
+            raise ValueError(err_msg % obs)
+
+        return _BaseHMM.fit(self, cleaned_obs, **kwargs)
+
+
 class GMMHMM(_BaseHMM):
     """Hidden Markov Model with Gaussin mixture emissions
 
