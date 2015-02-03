@@ -54,6 +54,10 @@ def unwrap_self_estep(arg, **kwarg):
     return _BaseHMM._do_estep(*arg, **kwarg)
 
 
+def unwrap_self_score(arg, **kwarg):
+    return _BaseHMM._score(*arg, **kwarg)
+
+
 def merge_sum(x, y):
     D = {}
     for k in x.keys():
@@ -307,12 +311,19 @@ class _BaseHMM(BaseEstimator):
 
         decode : Find most likely state sequence corresponding to a `obs`
         """
-        logprob = 0
-        for seq in obs:
-            seq = np.asarray(seq)
-            framelogprob = self._compute_log_likelihood(seq)
-            lpr, _ = self._do_forward_pass(framelogprob)
-            logprob += lpr
+        n_batches = (len(obs) // self.batch_size) + \
+                (1 if len(obs) % self.batch_size else 0)
+        if self.n_jobs == 1:
+            logprob = 0
+            for obs_batch in batches(obs, self.batch_size):
+                logprob += self._score(obs_batch)
+        else:
+            pool = mp.Pool(processes=self.n_jobs)
+            results = pool.map(unwrap_self_score,
+                               zip([self] * n_batches,
+                                   batches(obs, self.batch_size)))
+            pool.terminate()
+            logprob = sum(results)
         return logprob
 
     def aic(self, obs):
@@ -777,6 +788,22 @@ class _BaseHMM(BaseEstimator):
         if self.memory_safe:
             local_obs = None
         return local_stats, curr_logprob
+
+    def _score(self, obs_batch):
+        if self.memory_safe:
+            local_obs = reduce(lambda x, y: x + y,
+                               [cPickle.load(open(filename, 'r'))
+                                for filename in obs_batch],
+                               [])
+        else:
+            local_obs = obs_batch
+        logprob = 0
+        for seq in local_obs:
+            seq = np.asarray(seq)
+            framelogprob = self._compute_log_likelihood(seq)
+            lpr, _ = self._do_forward_pass(framelogprob)
+            logprob += lpr
+        return logprob
 
     def _do_mstep(self, stats, params):
         # Based on Huang, Acero, Hon, "Spoken Language Processing",

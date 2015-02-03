@@ -37,6 +37,10 @@ def unwrap_self_estep(arg, **kwarg):
     return _BaseMixHMM._do_estep(*arg, **kwarg)
 
 
+def unwrap_self_score(arg, **kwarg):
+    return _BaseMixHMM._score(*arg, **kwarg)
+
+
 class _BaseMixHMM(BaseEstimator):
     """Hidden Markov Model base class.
 
@@ -194,15 +198,20 @@ class _BaseMixHMM(BaseEstimator):
         score_samples : Compute the log probability under the model and
             posteriors
         """
-        logprob = np.zeros(len(obs))
-        for i, seq in enumerate(obs):
-            framelogprob = self._compute_log_likelihood(seq)
-            curr_logprob = np.array([self.hmms[k]._do_forward_pass(
-                framelogprob[:, :, k])[0]
-                for k in range(self.n_components)])
-            curr_logprob += self._log_component_weights
-            logprob[i] = logsumexp(curr_logprob)
-        return sum(logprob)
+        n_batches = (len(obs) // self.batch_size) + \
+            (1 if len(obs) % self.batch_size else 0)
+        if self.n_jobs == 1:
+            logprob = 0
+            for obs_batch in batches(obs, self.batch_size):
+                logprob += self._score(obs_batch)
+        else:
+            pool = mp.Pool(processes=self.n_jobs)
+            results = pool.map(unwrap_self_score,
+                               zip([self] * n_batches,
+                                   batches(obs, self.batch_size)))
+            pool.terminate()
+            logprob = sum(results)
+        return logprob
 
     def aic(self, obs):
         """Computes the Aikaike Information Criterion of the model and
@@ -523,6 +532,25 @@ class _BaseMixHMM(BaseEstimator):
         if self.memory_safe:
             local_obs = None
         return local_stats, local_logprob
+
+    def _score(self, obs_batch):
+        if self.memory_safe:
+            local_obs = reduce(lambda x, y: x + y,
+                               [cPickle.load(open(filename, 'r'))
+                                for filename in obs_batch],
+                               [])
+        else:
+            local_obs = obs_batch
+        logprob = 0
+        for seq in local_obs:
+            framelogprob = self._compute_log_likelihood(seq)
+            lpr = np.array([self.hmms[k]._do_forward_pass(
+                framelogprob[:, :, k])[0]
+                for k in range(self.n_components)])
+            lpr += self._log_component_weights
+            logprob += logsumexp(lpr)
+        return logprob
+
 
     def _do_mstep(self, stats, params):
         # Based on Huang, Acero, Hon, "Spoken Language Processing",
