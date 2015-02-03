@@ -272,7 +272,7 @@ class _BaseHMM(BaseEstimator):
         posteriors = []
         for seq in obs:
             seq = np.asarray(seq)
-            framelogprob = self._compute_log_likelihood(seql)
+            framelogprob = self._compute_log_likelihood(seq)
             lpr, fwdlattice = self._do_forward_pass(framelogprob)
             bwdlattice = self._do_backward_pass(framelogprob)
             gamma = fwdlattice + bwdlattice
