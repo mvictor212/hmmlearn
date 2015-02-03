@@ -969,12 +969,12 @@ class GaussianHMM(_BaseHMM):
         else:
             concat_obs = np.vstack(obs)
         if (hasattr(self, 'n_features')
-                and self.n_features != concat_obs[0].shape[1]):
+                and self.n_features != concat_obs.shape[1]):
             raise ValueError('Unexpected number of dimensions, got %s but '
-                             'expected %s' % (concat_obs[0].shape[1],
+                             'expected %s' % (concat_obs.shape[1],
                                               self.n_features))
 
-        self.n_features = concat_obs[0].shape[1]
+        self.n_features = concat_obs.shape[1]
 
         if 'm' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
