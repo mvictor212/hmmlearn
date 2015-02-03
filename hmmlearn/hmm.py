@@ -1899,7 +1899,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         expon_obs = expon.rvs(scale=1. / self._rates[state])
         return symbol, expon_obs
 
-    def _init(self, obs, params='ste'):
+    def _init(self, obs, params='ster'):
         super(MultinomialExponentialHMM, self)._init(obs, params=params)
         self.random_state = check_random_state(self.random_state)
 
