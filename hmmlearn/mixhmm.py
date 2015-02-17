@@ -1590,7 +1590,7 @@ class GaussianMixHMM(_BaseMixHMM):
                          for _ in range(self.n_components)]
             self.hmms[0]._init(obs)
             means = self.hmms[0].means_
-            covars = self.hmms[0].covars_
+            covars = self.hmms[0]._covars_
             for hmm in self.hmms[1:]:
                 if self.tied:
                     hmm.means_ = means
