@@ -10,10 +10,8 @@ The :mod:`hmmlearn.hmm` module implements hidden Markov models.
 """
 
 import string
-import cPickle
 
 import numpy as np
-import multiprocessing as mp
 from numpy.random import multivariate_normal, normal
 
 from sklearn.utils import check_random_state
@@ -43,19 +41,34 @@ NEGINF = -np.inf
 decoder_algorithms = ("viterbi", "map")
 
 
-def batches(l, n):
-    """ Yield successive n-sized batches from l.
-    """
-    for i in xrange(0, len(l), n):
-        yield l[i:i+n]
+def identity(x):
+    return x
 
 
-def unwrap_self_estep(arg, **kwarg):
-    return _BaseHMM._do_estep(*arg, **kwarg)
+def _do_estep(seq, modelBroadcast):
+    model = modelBroadcast.value
+    stats = model._initialize_sufficient_statistics()
+    framelogprob = model._compute_log_likelihood(seq)
+    lpr, fwdlattice = model._do_forward_pass(framelogprob)
+    bwdlattice = model._do_backward_pass(framelogprob)
+    gamma = fwdlattice + bwdlattice
+    posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
+    model._accumulate_sufficient_statistics(stats,
+                                            seq,
+                                            framelogprob,
+                                            posteriors,
+                                            fwdlattice,
+                                            bwdlattice,
+                                            model.params)
+    return stats, lpr
 
 
-def unwrap_self_score(arg, **kwarg):
-    return _BaseHMM._score(*arg, **kwarg)
+def _score(seq, modelBroadcast):
+    model = modelBroadcast.value
+    seq = np.asarray(seq)
+    framelogprob = model._compute_log_likelihood(seq)
+    lpr, _ = model._do_forward_pass(framelogprob)
+    return lpr
 
 
 def merge_sum(x, y):
@@ -69,10 +82,6 @@ def merge_sum(x, y):
         else:
             D[k] = x[k] + y[k]
     return D
-
-
-def reduce_merge_sum(L):
-    return reduce(lambda x, y: merge_sum(x, y), L)
 
 
 def log_normalize(A, axis=None):
@@ -228,8 +237,7 @@ class _BaseHMM(BaseEstimator):
                  startprob_prior=None, transmat_prior=None,
                  algorithm="viterbi", random_state=None,
                  n_iter=10, thresh=1e-2, params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0,
-                 n_jobs=1, batch_size=1, memory_safe=False):
+                 init_params=string.ascii_letters, verbose=0):
 
         self.n_states = n_states
         self.n_iter = n_iter
@@ -248,9 +256,6 @@ class _BaseHMM(BaseEstimator):
         self._algorithm = algorithm
         self.random_state = random_state
         self.verbose = verbose
-        self.n_jobs = n_jobs
-        self.batch_size = batch_size
-        self.memory_safe = memory_safe
 
     def eval(self, X):
         return self.score_samples(X)
@@ -296,7 +301,7 @@ class _BaseHMM(BaseEstimator):
             logprob += lpr
         return logprob, posteriors
 
-    def score(self, obs):
+    def score(self, sc, data):
         """Compute the log probability under the model.
 
         Parameters
@@ -317,22 +322,11 @@ class _BaseHMM(BaseEstimator):
 
         decode : Find most likely state sequence corresponding to a `obs`
         """
-        n_batches = (len(obs) // self.batch_size) + \
-                (1 if len(obs) % self.batch_size else 0)
-        if self.n_jobs == 1:
-            logprob = 0
-            for obs_batch in batches(obs, self.batch_size):
-                logprob += self._score(obs_batch)
-        else:
-            pool = mp.Pool(processes=self.n_jobs)
-            results = pool.map(unwrap_self_score,
-                               zip([self] * n_batches,
-                                   batches(obs, self.batch_size)))
-            pool.terminate()
-            logprob = sum(results)
+        modelBroadcast = sc.broadcast(self)
+        logprob = data.map(lambda seq: _score(seq, modelBroadcast)).reduce(lambda a, b: a + b)
         return logprob
 
-    def aic(self, obs):
+    def aic(self, sc, obs):
         """Computes the Aikaike Information Criterion of the model and
         set of observations.
 
@@ -346,12 +340,12 @@ class _BaseHMM(BaseEstimator):
         aic_score : float
             The Aikaike Information Criterion.
         """
-        logprob = self.score(obs)
+        logprob = self.score(sc, obs)
         n_pars = self._n_free_parameters()
         aic_score = 2 * n_pars - 2 * logprob
         return aic_score
 
-    def bic(self, obs):
+    def bic(self, sc, obs):
         """Computes the Aikaike Information Criterion of the model and
         set of observations.
 
@@ -365,7 +359,7 @@ class _BaseHMM(BaseEstimator):
         bic_score : float
             The Aikaike Information Criterion.
         """
-        logprob = self.score(obs)
+        logprob = self.score(sc, obs)
         n_pars = self._n_free_parameters()
         n_data = sum([len(seq) for seq in obs])
         bic_score = n_pars * (np.log(n_data) - np.log(2 * np.pi)) - 2 * logprob
@@ -402,7 +396,8 @@ class _BaseHMM(BaseEstimator):
         for n, seq in enumerate(obs):
             seq = np.asarray(seq)
             framelogprob = self._compute_log_likelihood(seq)
-            viterbi_logprobs[n], state_sequence = self._do_viterbi_pass(framelogprob)
+            viterbi_logprobs[n], state_sequence = self._do_viterbi_pass(
+                framelogprob)
             state_sequences.append(state_sequence)
         return viterbi_logprobs, state_sequences
 
@@ -566,7 +561,7 @@ class _BaseHMM(BaseEstimator):
 
         return obs, states
 
-    def fit(self, obs, warm_start=False):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -592,40 +587,26 @@ class _BaseHMM(BaseEstimator):
         parameter.
         """
 
-        if self.memory_safe and (not isinstance(obs[0], str)):
-            raise ValueError("Filepath locations must be provided as \
-                             observations to be memory safe.")
-
-        n_batches = (len(obs) // self.batch_size) + \
-            (1 if len(obs) % self.batch_size else 0)
         if self.algorithm not in decoder_algorithms:
             self._algorithm = "viterbi"
 
         if not warm_start:
-            self._init(obs, self.init_params)
+            self._init(data, self.init_params)
 
         if self.verbose:
             verbose_reporter = VerboseReporter(self.verbose)
             verbose_reporter.init()
 
+        data.cache()
+
         logprob = []
         for i in range(self.n_iter):
             # Expectation step
-            if self.n_jobs == 1:
-                stats = self._initialize_sufficient_statistics()
-                curr_logprob = 0
-                for obs_batch in batches(obs, self.batch_size):
-                    seq_stats, lpr = self._do_estep(obs_batch)
-                    stats = merge_sum(stats, seq_stats)
-                    curr_logprob += lpr
-            else:
-                pool = mp.Pool(processes=self.n_jobs)
-                results = pool.map(unwrap_self_estep,
-                                   zip([self] * n_batches,
-                                       batches(obs, self.batch_size)))
-                pool.terminate()
-                stats = reduce_merge_sum([x[0] for x in results])
-                curr_logprob = sum([x[1] for x in results])
+            modelBroadcast = sc.broadcast(self)
+            results = data.map(lambda seq: _do_estep(seq, modelBroadcast)).cache()
+            stats = results.keys().reduce(merge_sum)
+            curr_logprob = results.values().reduce(lambda a, b:
+                                                   a + b)
             logprob.append(curr_logprob)
             if i > 0:
                 improvement = logprob[-1] - logprob[-2]
@@ -772,46 +753,6 @@ class _BaseHMM(BaseEstimator):
                                      framelogprob, lnP, lneta)
                 stats['trans'] += np.exp(np.minimum(logsumexp(lneta, 0), 700))
 
-    def _do_estep(self, obs_batch):
-        if self.memory_safe:
-            local_obs = reduce(lambda x, y: x + y,
-                               [cPickle.load(open(filename, 'r'))
-                                for filename in obs_batch],
-                               [])
-        else:
-            local_obs = obs_batch
-        local_stats = self._initialize_sufficient_statistics()
-        curr_logprob = 0
-        for seq in local_obs:
-            framelogprob = self._compute_log_likelihood(seq)
-            lpr, fwdlattice = self._do_forward_pass(framelogprob)
-            curr_logprob += lpr
-            bwdlattice = self._do_backward_pass(framelogprob)
-            gamma = fwdlattice + bwdlattice
-            posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
-            self._accumulate_sufficient_statistics(local_stats, seq, framelogprob,
-                                                   posteriors, fwdlattice,
-                                                   bwdlattice, self.params)
-        if self.memory_safe:
-            local_obs = None
-        return local_stats, curr_logprob
-
-    def _score(self, obs_batch):
-        if self.memory_safe:
-            local_obs = reduce(lambda x, y: x + y,
-                               [cPickle.load(open(filename, 'r'))
-                                for filename in obs_batch],
-                               [])
-        else:
-            local_obs = obs_batch
-        logprob = 0
-        for seq in local_obs:
-            seq = np.asarray(seq)
-            framelogprob = self._compute_log_likelihood(seq)
-            lpr, _ = self._do_forward_pass(framelogprob)
-            logprob += lpr
-        return logprob
-
     def _do_mstep(self, stats, params):
         # Based on Huang, Acero, Hon, "Spoken Language Processing",
         # p. 443 - 445
@@ -919,19 +860,13 @@ class GaussianHMM(_BaseHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0,
-                 n_jobs=1,
-                 batch_size=1,
-                 memory_safe=False):
+                 verbose=0):
         _BaseHMM.__init__(self, n_states, startprob, transmat,
                           startprob_prior=startprob_prior,
                           transmat_prior=transmat_prior, algorithm=algorithm,
                           random_state=random_state, n_iter=n_iter,
                           thresh=thresh, params=params,
-                          init_params=init_params, verbose=verbose,
-                          n_jobs=n_jobs,
-                          batch_size=batch_size,
-                          memory_safe=memory_safe)
+                          init_params=init_params, verbose=verbose)
 
         self._covariance_type = covariance_type
         if not covariance_type in ['spherical', 'tied', 'diag', 'full']:
@@ -998,10 +933,11 @@ class GaussianHMM(_BaseHMM):
     def _init(self, obs, params='stmc'):
         super(GaussianHMM, self)._init(obs, params=params)
 
-        if self.memory_safe:
-            concat_obs = np.vstack(cPickle.load(open(obs[0], 'r')))
-        else:
-            concat_obs = np.vstack(obs)
+        concat_obs = np.vstack(obs
+                               .flatMap(identity)
+                               .sample(False, 0.01)
+                               .map(np.atleast_2d)
+                               .collect())
         if (hasattr(self, 'n_features')
                 and self.n_features != concat_obs.shape[1]):
             raise ValueError('Unexpected number of dimensions, got %s but '
@@ -1090,7 +1026,7 @@ class GaussianHMM(_BaseHMM):
                     obsmean = np.outer(stats['obs'][c], self._means_[c])
 
                     cvnum[c] = (np.outer(self._means_[c],
-                                                        self._means_[c])
+                                         self._means_[c])
                                 + stats['obs*obs.T'][c]
                                 - obsmean - obsmean.T
                                 + np.outer(self._means_[c], self._means_[c])
@@ -1111,12 +1047,13 @@ class GaussianHMM(_BaseHMM):
         elif self._covariance_type == 'tied':
             n_pars += ((self.n_features + 1) * self.n_features) / 2
         elif self._covariance_type == 'diag':
-            n_pars  += self.n_states * self.n_features
+            n_pars += self.n_states * self.n_features
         elif self._covariance_type == 'full':
-            n_pars += self.n_states * ((self.n_features + 1) * self.n_features) / 2
+            n_pars += self.n_states * ((self.n_features + 1)
+                                       * self.n_features) / 2
         return n_pars
 
-    def fit(self, obs, warm_start=False):
+    def fit(self, sc, obs, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1140,7 +1077,7 @@ class GaussianHMM(_BaseHMM):
         more components becomminging too small).  You can fix this by getting
         more training data, or increasing covars_prior.
         """
-        return super(GaussianHMM, self).fit(obs, warm_start)
+        return super(GaussianHMM, self).fit(sc, obs, warm_start)
 
 
 class MultinomialHMM(_BaseHMM):
@@ -1207,7 +1144,7 @@ class MultinomialHMM(_BaseHMM):
                  emissionprob_prior=None, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters, init_params=string.ascii_letters,
-                 verbose=0, n_jobs=1, batch_size=1, memory_safe=False):
+                 verbose=0):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1224,10 +1161,7 @@ class MultinomialHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          n_jobs=n_jobs,
-                          batch_size=batch_size,
-                          memory_safe=memory_safe)
+                          verbose=verbose)
 
         self.emissionprob_prior = emissionprob_prior
 
@@ -1270,13 +1204,7 @@ class MultinomialHMM(_BaseHMM):
 
         if 'e' in params:
             if not hasattr(self, 'n_symbols'):
-                symbols = set()
-                for o in obs:
-                    if self.memory_safe:
-                        symbols = symbols.union(set(np.concatenate(
-                            cPickle.load(open(o, 'r')))))
-                    else:
-                        symbols = symbols.union(set(o))
+                symbols = set(obs.flatMap(identity).distinct().collect())
                 self.n_symbols = len(symbols)
             if self.emissionprob_prior is None:
                 self.emissionprob_prior = np.ones((self.n_states,
@@ -1313,13 +1241,7 @@ class MultinomialHMM(_BaseHMM):
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, 0, 3, 5, 10] not
         """
 
-        if self.memory_safe:
-            symbols = []
-            for o in obs:
-                symbols += cPickle.load(open(o, 'r'))
-            symbols = np.concatenate(symbols)
-        else:
-            symbols = np.concatenate(obs)
+        symbols = obs.copy()
 
         if symbols.dtype.kind != 'i':
             # input symbols must be integer
@@ -1333,11 +1255,6 @@ class MultinomialHMM(_BaseHMM):
             # input contains negative intiger
             return False
 
-        symbols.sort()
-        if np.any(np.diff(symbols) > 1):
-            # input is discontinous
-            return False
-
         return True
 
     def _n_free_parameters(self):
@@ -1345,7 +1262,7 @@ class MultinomialHMM(_BaseHMM):
         n_pars += self.n_states * (self.n_symbols - 1)
         return n_pars
 
-    def fit(self, obs, warm_start=False, **kwargs):
+    def fit(self, sc, data, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1365,10 +1282,14 @@ class MultinomialHMM(_BaseHMM):
                    "in all, every element must be continuous, but %s was "
                    "given.")
 
-        if not self._check_input_symbols(obs):
-            raise ValueError(err_msg % obs)
+        modelBroadcast = sc.broadcast(self)
 
-        return super(MultinomialHMM, self).fit(obs, warm_start, **kwargs)
+        if not data.map(lambda x: modelBroadcast.value._check_input_symbols(x)).min():
+            raise ValueError(err_msg % data.take(5))
+        elif np.any(np.diff(data.flatMap(identity).distinct().sortBy(identity).collect()) > 1):
+            raise ValueError(err_msg % data.take(5))
+
+        return super(MultinomialHMM, self).fit(sc, data, warm_start, **kwargs)
 
 
 class PoissonHMM(_BaseHMM):
@@ -1432,8 +1353,7 @@ class PoissonHMM(_BaseHMM):
                  rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0,
-                 n_jobs=1, batch_size=1, memory_safe=False):
+                 init_params=string.ascii_letters, verbose=0):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1450,10 +1370,7 @@ class PoissonHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          n_jobs=n_jobs,
-                          batch_size=batch_size,
-                          memory_safe=memory_safe)
+                          verbose=verbose)
         self.rates_var = rates_var
 
     def _get_rates(self):
@@ -1475,10 +1392,7 @@ class PoissonHMM(_BaseHMM):
     def _init(self, obs, params='str'):
         super(PoissonHMM, self)._init(obs, params=params)
 
-        if self.memory_safe:
-            concat_obs = np.concatenate(cPickle.load(open(obs[0], 'r')))
-        else:
-            concat_obs = np.concatenate(obs)
+        concat_obs = np.array(obs.flatMap(identity).sample(False, 0.01).collect())
         if 'r' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
                 np.atleast_2d(concat_obs).T)
@@ -1514,34 +1428,18 @@ class PoissonHMM(_BaseHMM):
         of non-negative integers.
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, -1, 3, 5, 10] not
         """
-        if self.memory_safe:
-            for o in obs:
-                symbols = np.concatenate(cPickle.load(open(o, 'r')))
+        symbols = obs.copy()
+        if symbols.dtype.kind != 'i':
+            # input symbols must be integer
+            return False
 
-                if symbols.dtype.kind != 'i':
-                    # input symbols must be integer
-                    return False
+        if len(symbols) == 1:
+            # input too short
+            return False
 
-                if len(symbols) == 1:
-                    # input too short
-                    return False
-
-                if np.any(symbols < 0):
-                    # input contains negative intiger
-                    return False
-        else:
-            symbols = np.concatenate(obs)
-            if symbols.dtype.kind != 'i':
-                # input symbols must be integer
-                return False
-
-            if len(symbols) == 1:
-                # input too short
-                return False
-
-            if np.any(symbols < 0):
-                # input contains negative intiger
-                return False
+        if np.any(symbols < 0):
+            # input contains negative intiger
+            return False
 
         return True
 
@@ -1550,7 +1448,7 @@ class PoissonHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, obs, warm_start=False):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1577,10 +1475,12 @@ class PoissonHMM(_BaseHMM):
         err_msg = ("Input must be a list of non-negative integer arrays, \
                    but %s was given.")
 
-        if not self._check_input_symbols(obs):
-            raise ValueError(err_msg % obs)
+        modelBroadcast = sc.broadcast(self)
 
-        return super(PoissonHMM, self).fit(obs, warm_start)
+        if not data.map(lambda x: modelBroadcast.value._check_input_symbols(x)).min():
+            raise ValueError(err_msg % data.take(5))
+
+        return super(PoissonHMM, self).fit(sc, data, warm_start)
 
 
 class ExponentialHMM(_BaseHMM):
@@ -1644,8 +1544,7 @@ class ExponentialHMM(_BaseHMM):
                  rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0,
-                 n_jobs=1, batch_size=1, memory_safe=False):
+                 init_params=string.ascii_letters, verbose=0):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1662,10 +1561,7 @@ class ExponentialHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          n_jobs=n_jobs,
-                          batch_size=batch_size,
-                          memory_safe=memory_safe)
+                          verbose=verbose)
         self.rates_var = rates_var
 
     def _get_rates(self):
@@ -1687,10 +1583,10 @@ class ExponentialHMM(_BaseHMM):
     def _init(self, obs, params='str'):
         super(ExponentialHMM, self)._init(obs, params=params)
 
-        if self.memory_safe:
-            concat_obs = np.concatenate(cPickle.load(open(obs[0], 'r')))
-        else:
-            concat_obs = np.concatenate(obs)
+        concat_obs = np.array(obs
+                              .flatMap(identity)
+                              .sample(False, 0.01)
+                              .collect())
         if 'r' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
                 np.atleast_2d(concat_obs).T)
@@ -1727,34 +1623,18 @@ class ExponentialHMM(_BaseHMM):
         e.g. x = [0., 0.5, 2.3] is OK and y = [0.0, -1.0, 3.3, 5.4, 10.9] not
         """
 
-        if self.memory_safe:
-            for o in obs:
-                symbols = np.concatenate(cPickle.load(open(o, 'r')))
+        symbols = obs.copy()
+        if symbols.dtype.kind not in ('f', 'i'):
+            # input symbols must be integer
+            return False
 
-                if symbols.dtype.kind not in ('f', 'i'):
-                    # input symbols must be integer
-                    return False
+        if len(symbols) == 1:
+            # input too short
+            return False
 
-                if len(symbols) == 1:
-                    # input too short
-                    return False
-
-                if np.any(symbols < 0):
-                    # input contains negative intiger
-                    return False
-        else:
-            symbols = np.concatenate(obs)
-            if symbols.dtype.kind not in ('f', 'i'):
-                # input symbols must be integer
-                return False
-
-            if len(symbols) == 1:
-                # input too short
-                return False
-
-            if np.any(symbols < 0):
-                # input contains negative intiger
-                return False
+        if np.any(symbols < 0):
+            # input contains negative intiger
+            return False
 
         return True
 
@@ -1763,7 +1643,7 @@ class ExponentialHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, obs, warm_start=False):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1790,10 +1670,12 @@ class ExponentialHMM(_BaseHMM):
         err_msg = ("Input must be a list of non-negative real arrays, \
                    but %s was given.")
 
-        if not self._check_input_symbols(obs):
-            raise ValueError(err_msg % obs)
+        modelBroadcast = sc.broadcast(self)
 
-        return super(ExponentialHMM, self).fit(obs, warm_start)
+        if not data.map(lambda x: modelBroadcast.value._check_input_symbols(x)).min():
+            raise ValueError(err_msg % data.take(5))
+
+        return super(ExponentialHMM, self).fit(sc, data, warm_start)
 
 
 class MultinomialExponentialHMM(_BaseHMM):
@@ -1863,7 +1745,7 @@ class MultinomialExponentialHMM(_BaseHMM):
                  emissionprob_prior=None, rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters, init_params=string.ascii_letters,
-                 verbose=0, n_jobs=1, batch_size=1, memory_safe=False):
+                 verbose=0):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1880,10 +1762,7 @@ class MultinomialExponentialHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          n_jobs=n_jobs,
-                          batch_size=batch_size,
-                          memory_safe=memory_safe)
+                          verbose=verbose)
 
         self.emissionprob_prior = emissionprob_prior
         self.rates_var = rates_var
@@ -1939,13 +1818,7 @@ class MultinomialExponentialHMM(_BaseHMM):
 
         if 'e' in params:
             if not hasattr(self, 'n_symbols'):
-                symbols = set()
-                for o in obs:
-                    if self.memory_safe:
-                        symbols = symbols.union(set(np.concatenate(
-                            cPickle.load(open(o, 'r')))[:, 0]))
-                    else:
-                        symbols = symbols.union(set(o[:, 0]))
+                symbols = set(obs.flatMap(identity).distinct().collect())
                 self.n_symbols = len(symbols)
             if self.emissionprob_prior is None:
                 self.emissionprob_prior = np.ones((self.n_states,
@@ -1955,10 +1828,7 @@ class MultinomialExponentialHMM(_BaseHMM):
                 for i in xrange(self.n_states)])
             self.emissionprob_ = emissionprob
 
-        if self.memory_safe:
-            concat_obs = np.concatenate(cPickle.load(open(obs[0], 'r')))[:, 1]
-        else:
-            concat_obs = np.concatenate(obs)[:, 1]
+        concat_obs = obs.flatMap(lambda seq: seq[:, 1]).sample(False, 0.01).collect()
         if 'r' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
                 np.atleast_2d(concat_obs).T)
@@ -1967,7 +1837,8 @@ class MultinomialExponentialHMM(_BaseHMM):
             self._rates = np.maximum(0.1, rates)
 
     def _initialize_sufficient_statistics(self):
-        stats = super(MultinomialExponentialHMM, self)._initialize_sufficient_statistics()
+        stats = super(MultinomialExponentialHMM,
+                      self)._initialize_sufficient_statistics()
         stats['obs'] = np.zeros((self.n_states, self.n_symbols))
         stats['post'] = np.zeros(self.n_states)
         stats['expon_obs'] = np.zeros((self.n_states,))
@@ -1976,9 +1847,14 @@ class MultinomialExponentialHMM(_BaseHMM):
     def _accumulate_sufficient_statistics(self, stats, obs, framelogprob,
                                           posteriors, fwdlattice, bwdlattice,
                                           params):
-        super(MultinomialExponentialHMM, self)._accumulate_sufficient_statistics(
-            stats, obs, framelogprob, posteriors, fwdlattice, bwdlattice,
-            params)
+        super(MultinomialExponentialHMM,
+              self)._accumulate_sufficient_statistics(stats,
+                                                      obs,
+                                                      framelogprob,
+                                                      posteriors,
+                                                      fwdlattice,
+                                                      bwdlattice,
+                                                      params)
         if 'e' in params:
             for t, symbol in enumerate(obs[:, 0]):
                 stats['obs'][:, int(symbol)] += posteriors[t]
@@ -2000,13 +1876,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, 0, 3, 5, 10] not
         """
 
-        if self.memory_safe:
-            symbols = []
-            for o in obs:
-                symbols += cPickle.load(open(o, 'r'))
-            symbols = np.concatenate(symbols)[:, 0]
-        else:
-            symbols = np.concatenate(obs)[:, 0]
+        symbols = obs[:, 0]
 
         if symbols.dtype.kind not in ('i', 'f'):
             # input symbols must be integer
@@ -2020,39 +1890,18 @@ class MultinomialExponentialHMM(_BaseHMM):
             # input contains negative intiger
             return False
 
-        symbols.sort()
-        if np.any(np.diff(symbols) > 1):
-            # input is discontinous
+        symbols = obs[:, 1]
+        if symbols.dtype.kind not in ('f', 'i'):
+            # input symbols must be integer
             return False
 
-        if self.memory_safe:
-            for o in obs:
-                symbols = np.concatenate(cPickle.load(open(o, 'r')))[:, 1]
+        if len(symbols) == 1:
+            # input too short
+            return False
 
-                if symbols.dtype.kind not in ('f', 'i'):
-                    # input symbols must be integer
-                    return False
-
-                if len(symbols) == 1:
-                    # input too short
-                    return False
-
-                if np.any(symbols < 0):
-                    # input contains negative intiger
-                    return False
-        else:
-            symbols = np.concatenate(obs)[:, 1]
-            if symbols.dtype.kind not in ('f', 'i'):
-                # input symbols must be integer
-                return False
-
-            if len(symbols) == 1:
-                # input too short
-                return False
-
-            if np.any(symbols < 0):
-                # input contains negative intiger
-                return False
+        if np.any(symbols < 0):
+            # input contains negative intiger
+            return False
 
         return True
 
@@ -2062,7 +1911,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, obs, warm_start=False, **kwargs):
+    def fit(self, sc, data, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -2082,12 +1931,16 @@ class MultinomialExponentialHMM(_BaseHMM):
                    "in all, every element must be continuous, but %s was "
                    "given.")
 
-        cleaned_obs = [np.array(seq) for seq in obs]
+        modelBroadcast = sc.broadcast(self)
 
-        if not self._check_input_symbols(cleaned_obs):
-            raise ValueError(err_msg % obs)
+        cleaned_data = data.map(lambda seq: np.array(seq))
 
-        return super(MultinomialExponentialHMM, self).fit(cleaned_obs, warm_start, **kwargs)
+        if not cleaned_data.map(lambda seq: modelBroadcast.value._check_input_symbols(seq)).min():
+            raise ValueError(err_msg % cleaned_data.take(5))
+        elif np.any(np.diff(cleaned_data.flatMap(lambda seq: seq[:, 0]).distinct().sortBy(identity).collect()) > 1):
+            raise ValueError(err_msg % cleaned_data.take(5))
+
+        return super(MultinomialExponentialHMM, self).fit(sc, cleaned_data, warm_start, **kwargs)
 
 
 class GMMHMM(_BaseHMM):
@@ -2156,8 +2009,7 @@ class GMMHMM(_BaseHMM):
                  covars_prior=1e-2, random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, means_var=1.0,
-                 n_jobs=1, batch_size=1, memory_safe=False):
+                 verbose=0, means_var=1.0):
         """Create a hidden Markov model with GMM emissions.
 
         Parameters
@@ -2174,10 +2026,7 @@ class GMMHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          n_jobs=n_jobs,
-                          batch_size=batch_size,
-                          memory_safe=memory_safe)
+                          verbose=verbose)
 
         # XXX: Hotfit for n_mix that is incompatible with the scikit's
         # BaseEstimator API
@@ -2214,10 +2063,11 @@ class GMMHMM(_BaseHMM):
     def _init(self, obs, params='stwmc'):
         super(GMMHMM, self)._init(obs, params=params)
 
-        if self.memory_safe:
-            concat_obs = np.concatenate(cPickle.load(open(obs[0], 'r')), 0)
-        else:
-            concat_obs = np.concatenate(obs, 0)
+        concat_obs = np.vstack(obs
+                               .flatMap(lambda x: x)
+                               .sample(False, 0.01)
+                               .map(np.atleast_2d)
+                               .collect())
         n_features = concat_obs.shape[1]
 
         for g in self.gmms_:
@@ -2316,7 +2166,7 @@ class GMMHMM(_BaseHMM):
             elif g.covariance_type == 'tied':
                 n_pars += ((n_features + 1) * n_features) / 2
             elif g.covariance_type == 'diag':
-                n_pars  += n_components * n_features
+                n_pars += n_components * n_features
             elif g.covariance_type == 'full':
                 n_pars += n_components * ((n_features + 1) * n_features) / 2
         return n_pars
