@@ -61,7 +61,13 @@ def unwrap_self_score(arg, **kwarg):
 def merge_sum(x, y):
     D = {}
     for k in x.keys():
-        D[k] = x[k] + y[k]
+        if isinstance(x[k], list):
+            z = []
+            for i in xrange(len(x[k])):
+                z.append(x[k][i] + y[k][i])
+            D[k] = z
+        else:
+            D[k] = x[k] + y[k]
     return D
 
 
