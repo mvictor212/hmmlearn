@@ -2243,12 +2243,12 @@ class GMMHMM(_BaseHMM):
                 np.log(posteriors[:, state][:, np.newaxis]
                        + np.finfo(np.float).eps)
             gmm_posteriors = np.exp(lgmm_posteriors)
-            tmp_gmm = GMM(g.n_states, covariance_type=g.covariance_type)
+            tmp_gmm = GMM(g.n_components, covariance_type=g.covariance_type)
             n_features = g.means_.shape[1]
             tmp_gmm._set_covars(
                 distribute_covar_matrix_to_match_covariance_type(
                     np.eye(n_features), g.covariance_type,
-                    g.n_states))
+                    g.n_components))
             norm = tmp_gmm._do_mstep(obs, gmm_posteriors, params)
 
             if np.any(np.isnan(tmp_gmm.covars_)):
