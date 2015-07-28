@@ -41,6 +41,32 @@ NEGINF = -np.inf
 decoder_algorithms = ("viterbi", "map")
 
 
+def _do_estep(seq, modelBroadcast):
+    model = modelBroadcast.value
+    stats = model._initialize_sufficient_statistics()
+    framelogprob = model._compute_log_likelihood(seq)
+    lpr, fwdlattice = model._do_forward_pass(framelogprob)
+    bwdlattice = model._do_backward_pass(framelogprob)
+    gamma = fwdlattice + bwdlattice
+    posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
+    model._accumulate_sufficient_statistics(stats,
+                                            seq,
+                                            framelogprob,
+                                            posteriors,
+                                            fwdlattice,
+                                            bwdlattice,
+                                            model.params)
+    return stats, lpr
+
+
+def _score(seq, modelBroadcast):
+    model = modelBroadcast.value
+    seq = np.asarray(seq)
+    framelogprob = model._compute_log_likelihood(seq)
+    lpr, _ = model._do_forward_pass(framelogprob)
+    return lpr
+
+
 def batches(l, n):
     """ Yield successive n-sized batches from l.
     """
@@ -280,7 +306,7 @@ class _BaseHMM(BaseEstimator):
             logprob += lpr
         return logprob, posteriors
 
-    def score(self, sc, obs):
+    def score(self, sc, data):
         """Compute the log probability under the model.
 
         Parameters
@@ -301,9 +327,8 @@ class _BaseHMM(BaseEstimator):
 
         decode : Find most likely state sequence corresponding to a `obs`
         """
-        rdd = sc.parallelize(batches(obs, self.batch_size))
-
-        logprob = rdd.map(self._score).reduce(lambda a, b: a + b)
+        modelBroadcast = sc.broadcast(self)
+        logprob = rdd.map(lambda seq: _score(seq, modelBroadcast)).reduce(lambda a, b: a + b)
         return logprob
 
     def aic(self, sc, obs):
@@ -541,7 +566,7 @@ class _BaseHMM(BaseEstimator):
 
         return obs, states
 
-    def fit(self, sc, obs):
+    def fit(self, sc, data):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -570,22 +595,22 @@ class _BaseHMM(BaseEstimator):
         if self.algorithm not in decoder_algorithms:
             self._algorithm = "viterbi"
 
-        self._init(obs, self.init_params)
+        self._init(data, self.init_params)
 
         if self.verbose:
             verbose_reporter = VerboseReporter(self.verbose)
             verbose_reporter.init()
 
-        rdd = sc.parallelize(batches(obs, self.batch_size))
-        rdd.persist()
+        data.cache()
 
         logprob = []
         for i in range(self.n_iter):
             # Expectation step
-            results = rdd.map(self._do_estep)
-            stats = results.map(lambda x: x[0]).reduce(merge_sum)
-            curr_logprob = results.map(lambda x: x[1]).reduce(lambda a, b:
-                                                              a + b)
+            modelBroadcast = sc.broadcast(self)
+            results = data.map(lambda seq: _do_estep(seq, modelBroadcast)).cache()
+            stats = results.keys().reduce(merge_sum)
+            curr_logprob = results.values().reduce(lambda a, b:
+                                                   a + b)
             logprob.append(curr_logprob)
             if i > 0:
                 improvement = logprob[-1] - logprob[-2]
@@ -731,36 +756,6 @@ class _BaseHMM(BaseEstimator):
                                      self._log_transmat, bwdlattice,
                                      framelogprob, lnP, lneta)
                 stats['trans'] += np.exp(np.minimum(logsumexp(lneta, 0), 700))
-
-    def _do_estep(self, obs_batch):
-        local_obs = obs_batch
-        local_stats = self._initialize_sufficient_statistics()
-        curr_logprob = 0
-        for seq in local_obs:
-            framelogprob = self._compute_log_likelihood(seq)
-            lpr, fwdlattice = self._do_forward_pass(framelogprob)
-            curr_logprob += lpr
-            bwdlattice = self._do_backward_pass(framelogprob)
-            gamma = fwdlattice + bwdlattice
-            posteriors = np.exp(gamma.T - logsumexp(gamma, axis=1)).T
-            self._accumulate_sufficient_statistics(local_stats,
-                                                   seq,
-                                                   framelogprob,
-                                                   posteriors,
-                                                   fwdlattice,
-                                                   bwdlattice,
-                                                   self.params)
-        return local_stats, curr_logprob
-
-    def _score(self, obs_batch):
-        local_obs = obs_batch
-        logprob = 0
-        for seq in local_obs:
-            seq = np.asarray(seq)
-            framelogprob = self._compute_log_likelihood(seq)
-            lpr, _ = self._do_forward_pass(framelogprob)
-            logprob += lpr
-        return logprob
 
     def _do_mstep(self, stats, params):
         # Based on Huang, Acero, Hon, "Spoken Language Processing",
