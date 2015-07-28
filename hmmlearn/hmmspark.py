@@ -328,7 +328,7 @@ class _BaseHMM(BaseEstimator):
         decode : Find most likely state sequence corresponding to a `obs`
         """
         modelBroadcast = sc.broadcast(self)
-        logprob = rdd.map(lambda seq: _score(seq, modelBroadcast)).reduce(lambda a, b: a + b)
+        logprob = data.map(lambda seq: _score(seq, modelBroadcast)).reduce(lambda a, b: a + b)
         return logprob
 
     def aic(self, sc, obs):
@@ -1246,7 +1246,7 @@ class MultinomialHMM(_BaseHMM):
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, 0, 3, 5, 10] not
         """
 
-        symbols = np.concatenate(obs)
+        symbols = obs.copy()
 
         if symbols.dtype.kind != 'i':
             # input symbols must be integer
@@ -1272,7 +1272,7 @@ class MultinomialHMM(_BaseHMM):
         n_pars += self.n_states * (self.n_symbols - 1)
         return n_pars
 
-    def fit(self, sc, obs, **kwargs):
+    def fit(self, sc, data, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1292,10 +1292,12 @@ class MultinomialHMM(_BaseHMM):
                    "in all, every element must be continuous, but %s was "
                    "given.")
 
-        if not self._check_input_symbols(obs):
-            raise ValueError(err_msg % obs)
+        modelBroadcast = sc.broadcast(self)
 
-        return _BaseHMM.fit(self, sc, obs, **kwargs)
+        if not data.map(lambda x: modelBroadcast.value._check_input_symbols(x)).min():
+            raise ValueError(err_msg % data.take(5))
+
+        return _BaseHMM.fit(self, sc, data, **kwargs)
 
 
 class PoissonHMM(_BaseHMM):
