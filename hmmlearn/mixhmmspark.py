@@ -425,10 +425,11 @@ class _BaseMixHMM(BaseEstimator):
         obsObsT = ('obs*obs.T' in tmp_stats['hmm_stats'][0])
 
         params = self.params
+        n_components = self.n_components
 
         def merge_sum(stats, additional_stats):
-            return _merge_sum(params, obs, post, expon_obs, obsSquared,
-                              obsObsT, stats, additional_stats)
+            return _merge_sum(params, n_components, obs, post, expon_obs,
+                              obsSquared, obsObsT, stats, additional_stats)
 
         logprob = []
         for i in range(self.n_iter):
