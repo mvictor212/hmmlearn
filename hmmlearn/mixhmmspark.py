@@ -726,7 +726,7 @@ class MultinomialMixHMM(_BaseMixHMM):
                 (self.hmms[0].n_states * (self.hmms[0].n_symbols - 1))
         return n_pars
 
-    def fit(self, sc, data, warm_start=False, **kwargs):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -751,7 +751,7 @@ class MultinomialMixHMM(_BaseMixHMM):
         elif np.any(np.diff(data.flatMap(identity).distinct().sortBy(identity).collect()) > 1):
             raise ValueError(err_msg % data.take(5))
 
-        return super(MultinomialMixHMM, self).fit(self, sc, data, warm_start, **kwargs)
+        return super(MultinomialMixHMM, self).fit(self, sc, data, warm_start)
 
 
 class MultinomialExponentialMixHMM(_BaseMixHMM):
@@ -965,7 +965,7 @@ class MultinomialExponentialMixHMM(_BaseMixHMM):
             n_pars -= (self.n_components - 1) * self.hmms[0].n_states
         return n_pars
 
-    def fit(self, sc, data, warm_start=False, **kwargs):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -992,7 +992,7 @@ class MultinomialExponentialMixHMM(_BaseMixHMM):
         elif np.any(np.diff(cleaned_data.flatMap(lambda seq: seq[:, 0]).distinct().sortBy(identity).collect()) > 1):
             raise ValueError(err_msg % cleaned_data.take(5))
 
-        return super(MultinomialExponentialMixHMM, self).fit(self, sc, cleaned_data, warm_start, **kwargs)
+        return super(MultinomialExponentialMixHMM, self).fit(self, sc, cleaned_data, warm_start)
 
 
 class PoissonMixHMM(_BaseMixHMM):
@@ -1164,7 +1164,7 @@ class PoissonMixHMM(_BaseMixHMM):
             n_pars -= (self.n_components - 1) * self.hmms[0].n_states
         return n_pars
 
-    def fit(self, sc, data, warm_start=False, **kwargs):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1186,7 +1186,7 @@ class PoissonMixHMM(_BaseMixHMM):
         if not data.map(lambda seq: modelBroadcast.value._check_input_symbols(seq)).min():
             raise ValueError(err_msg % data.take(5))
 
-        return super(PoissonMixHMM, self).fit(self, sc, data, warm_start, **kwargs)
+        return super(PoissonMixHMM, self).fit(self, sc, data, warm_start)
 
 
 class ExponentialMixHMM(_BaseMixHMM):
@@ -1359,7 +1359,7 @@ class ExponentialMixHMM(_BaseMixHMM):
             n_pars -= (self.n_components - 1) * self.hmms[0].n_states
         return n_pars
 
-    def fit(self, sc, data, warm_start=False, **kwargs):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1381,7 +1381,7 @@ class ExponentialMixHMM(_BaseMixHMM):
         if not data.map(lambda seq: modelBroadcast.value._check_input_symbols(seq)).min():
             raise ValueError(err_msg % data.take(5))
 
-        return super(ExponentialMixHMM, self).fit(self, sc, data, warm_start, **kwargs)
+        return super(ExponentialMixHMM, self).fit(self, sc, data, warm_start)
 
 
 class GaussianMixHMM(_BaseMixHMM):
@@ -1563,7 +1563,7 @@ class GaussianMixHMM(_BaseMixHMM):
                         stats['hmm_stats'][k]['obs*obs.T'] += \
                             component_weights[k] * inner_stats['obs*obs.T'][k]
 
-    def fit(self, sc, data, warm_start=False, **kwargs):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1577,7 +1577,7 @@ class GaussianMixHMM(_BaseMixHMM):
             has shape (n_i, n_features), where n_i is the length of
             the i_th observation.
         """
-        return super(GaussianMixHMM, self).fit(self, sc, data, warm_start, **kwargs)
+        return super(GaussianMixHMM, self).fit(self, sc, data, warm_start)
 
     def _n_free_parameters(self):
         n_pars = self.n_components - 1
