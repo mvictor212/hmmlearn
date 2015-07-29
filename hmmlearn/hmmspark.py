@@ -71,13 +71,6 @@ def _score(seq, modelBroadcast):
     return lpr
 
 
-def batches(l, n):
-    """ Yield successive n-sized batches from l.
-    """
-    for i in xrange(0, len(l), n):
-        yield l[i:(i + n)]
-
-
 def merge_sum(x, y):
     D = {}
     for k in x.keys():
@@ -244,8 +237,7 @@ class _BaseHMM(BaseEstimator):
                  startprob_prior=None, transmat_prior=None,
                  algorithm="viterbi", random_state=None,
                  n_iter=10, thresh=1e-2, params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0,
-                 batch_size=1):
+                 init_params=string.ascii_letters, verbose=0):
 
         self.n_states = n_states
         self.n_iter = n_iter
@@ -264,7 +256,6 @@ class _BaseHMM(BaseEstimator):
         self._algorithm = algorithm
         self.random_state = random_state
         self.verbose = verbose
-        self.batch_size = batch_size
 
     def eval(self, X):
         return self.score_samples(X)
@@ -868,15 +859,13 @@ class GaussianHMM(_BaseHMM):
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0,
-                 batch_size=1):
+                 verbose=0):
         _BaseHMM.__init__(self, n_states, startprob, transmat,
                           startprob_prior=startprob_prior,
                           transmat_prior=transmat_prior, algorithm=algorithm,
                           random_state=random_state, n_iter=n_iter,
                           thresh=thresh, params=params,
-                          init_params=init_params, verbose=verbose,
-                          batch_size=batch_size)
+                          init_params=init_params, verbose=verbose)
 
         self._covariance_type = covariance_type
         if not covariance_type in ['spherical', 'tied', 'diag', 'full']:
@@ -1154,7 +1143,7 @@ class MultinomialHMM(_BaseHMM):
                  emissionprob_prior=None, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters, init_params=string.ascii_letters,
-                 verbose=0, batch_size=1):
+                 verbose=0):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1171,8 +1160,7 @@ class MultinomialHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          batch_size=batch_size)
+                          verbose=verbose)
 
         self.emissionprob_prior = emissionprob_prior
 
@@ -1364,8 +1352,7 @@ class PoissonHMM(_BaseHMM):
                  rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0,
-                 batch_size=1):
+                 init_params=string.ascii_letters, verbose=0):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1382,8 +1369,7 @@ class PoissonHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          batch_size=batch_size)
+                          verbose=verbose)
         self.rates_var = rates_var
 
     def _get_rates(self):
@@ -1557,8 +1543,7 @@ class ExponentialHMM(_BaseHMM):
                  rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
-                 init_params=string.ascii_letters, verbose=0,
-                 batch_size=1):
+                 init_params=string.ascii_letters, verbose=0):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1575,8 +1560,7 @@ class ExponentialHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          batch_size=batch_size)
+                          verbose=verbose)
         self.rates_var = rates_var
 
     def _get_rates(self):
@@ -1760,7 +1744,7 @@ class MultinomialExponentialHMM(_BaseHMM):
                  emissionprob_prior=None, rates_var=1.0, algorithm="viterbi",
                  random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters, init_params=string.ascii_letters,
-                 verbose=0, batch_size=1):
+                 verbose=0):
         """Create a hidden Markov model with multinomial emissions.
 
         Parameters
@@ -1777,8 +1761,7 @@ class MultinomialExponentialHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          batch_size=batch_size)
+                          verbose=verbose)
 
         self.emissionprob_prior = emissionprob_prior
         self.rates_var = rates_var
@@ -1834,9 +1817,7 @@ class MultinomialExponentialHMM(_BaseHMM):
 
         if 'e' in params:
             if not hasattr(self, 'n_symbols'):
-                symbols = set()
-                for o in obs:
-                    symbols = symbols.union(set(o[:, 0]))
+                symbols = set(obs.flatMap(identity).distinct().collect())
                 self.n_symbols = len(symbols)
             if self.emissionprob_prior is None:
                 self.emissionprob_prior = np.ones((self.n_states,
@@ -1846,7 +1827,7 @@ class MultinomialExponentialHMM(_BaseHMM):
                 for i in xrange(self.n_states)])
             self.emissionprob_ = emissionprob
 
-        concat_obs = np.concatenate(obs)[:, 1]
+        concat_obs = obs.flatMap(lambda seq: seq[:, 1]).sample(False, 0.01).collect()
         if 'r' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
                 np.atleast_2d(concat_obs).T)
@@ -1894,7 +1875,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, 0, 3, 5, 10] not
         """
 
-        symbols = np.concatenate(obs)[:, 0]
+        symbols = obs[:, 0]
 
         if symbols.dtype.kind not in ('i', 'f'):
             # input symbols must be integer
@@ -1908,12 +1889,7 @@ class MultinomialExponentialHMM(_BaseHMM):
             # input contains negative intiger
             return False
 
-        symbols.sort()
-        if np.any(np.diff(symbols) > 1):
-            # input is discontinous
-            return False
-
-        symbols = np.concatenate(obs)[:, 1]
+        symbols = obs[:, 1]
         if symbols.dtype.kind not in ('f', 'i'):
             # input symbols must be integer
             return False
@@ -1934,7 +1910,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, sc, obs, **kwargs):
+    def fit(self, sc, data, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1954,12 +1930,16 @@ class MultinomialExponentialHMM(_BaseHMM):
                    "in all, every element must be continuous, but %s was "
                    "given.")
 
-        cleaned_obs = [np.array(seq) for seq in obs]
+        modelBroadcast = sc.broadcast(self)
 
-        if not self._check_input_symbols(cleaned_obs):
-            raise ValueError(err_msg % obs)
+        cleaned_data = data.map(lambda seq: np.array(seq))
 
-        return _BaseHMM.fit(self, sc, cleaned_obs, **kwargs)
+        if not cleaned_data.map(lambda seq: modelBroadcast.value._check_input_symbols(seq)).min():
+            raise ValueError(err_msg % cleaned_data.take(5))
+        elif np.any(np.diff(cleaned_data.flatMap(lambda seq: seq[:, 0]).distinct().sortBy(identity).collect()) > 1):
+            raise ValueError(err_msg % cleaned_data.take(5))
+
+        return _BaseHMM.fit(self, sc, cleaned_data, **kwargs)
 
 
 class GMMHMM(_BaseHMM):
@@ -2028,7 +2008,7 @@ class GMMHMM(_BaseHMM):
                  covars_prior=1e-2, random_state=None, n_iter=10, thresh=1e-2,
                  params=string.ascii_letters,
                  init_params=string.ascii_letters,
-                 verbose=0, means_var=1.0, batch_size=1):
+                 verbose=0, means_var=1.0):
         """Create a hidden Markov model with GMM emissions.
 
         Parameters
@@ -2045,8 +2025,7 @@ class GMMHMM(_BaseHMM):
                           thresh=thresh,
                           params=params,
                           init_params=init_params,
-                          verbose=verbose,
-                          batch_size=batch_size)
+                          verbose=verbose)
 
         # XXX: Hotfit for n_mix that is incompatible with the scikit's
         # BaseEstimator API
