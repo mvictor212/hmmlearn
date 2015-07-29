@@ -41,6 +41,10 @@ NEGINF = -np.inf
 decoder_algorithms = ("viterbi", "map")
 
 
+def identity(x):
+    return x
+
+
 def _do_estep(seq, modelBroadcast):
     model = modelBroadcast.value
     stats = model._initialize_sufficient_statistics()
@@ -939,7 +943,11 @@ class GaussianHMM(_BaseHMM):
     def _init(self, obs, params='stmc'):
         super(GaussianHMM, self)._init(obs, params=params)
 
-        concat_obs = np.vstack(obs)
+        concat_obs = np.vstack(obs
+                               .flatMap(identity)
+                               .sample(False, 0.01)
+                               .map(np.atleast_2d)
+                               .collect())
         if (hasattr(self, 'n_features')
                 and self.n_features != concat_obs.shape[1]):
             raise ValueError('Unexpected number of dimensions, got %s but '
@@ -1207,9 +1215,7 @@ class MultinomialHMM(_BaseHMM):
 
         if 'e' in params:
             if not hasattr(self, 'n_symbols'):
-                symbols = set()
-                for o in obs:
-                    symbols = symbols.union(set(o))
+                symbols = set(obs.flatMap(identity).distinct().collect())
                 self.n_symbols = len(symbols)
             if self.emissionprob_prior is None:
                 self.emissionprob_prior = np.ones((self.n_states,
@@ -1260,11 +1266,6 @@ class MultinomialHMM(_BaseHMM):
             # input contains negative intiger
             return False
 
-        symbols.sort()
-        if np.any(np.diff(symbols) > 1):
-            # input is discontinous
-            return False
-
         return True
 
     def _n_free_parameters(self):
@@ -1295,6 +1296,8 @@ class MultinomialHMM(_BaseHMM):
         modelBroadcast = sc.broadcast(self)
 
         if not data.map(lambda x: modelBroadcast.value._check_input_symbols(x)).min():
+            raise ValueError(err_msg % data.take(5))
+        elif np.any(np.diff(data.flatMap(identity).distinct().sortBy(identity).collect()) > 1):
             raise ValueError(err_msg % data.take(5))
 
         return _BaseHMM.fit(self, sc, data, **kwargs)
@@ -1402,7 +1405,7 @@ class PoissonHMM(_BaseHMM):
     def _init(self, obs, params='str'):
         super(PoissonHMM, self)._init(obs, params=params)
 
-        concat_obs = np.concatenate(obs)
+        concat_obs = np.array(obs.flatMap(identity).sample(False, 0.01).collect())
         if 'r' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
                 np.atleast_2d(concat_obs).T)
@@ -1438,7 +1441,7 @@ class PoissonHMM(_BaseHMM):
         of non-negative integers.
         e.g. x = [0, 0, 2, 1, 3, 1, 1] is OK and y = [0, -1, 3, 5, 10] not
         """
-        symbols = np.concatenate(obs)
+        symbols = obs.copy()
         if symbols.dtype.kind != 'i':
             # input symbols must be integer
             return False
@@ -1458,7 +1461,7 @@ class PoissonHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, sc, obs):
+    def fit(self, sc, data):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1485,10 +1488,12 @@ class PoissonHMM(_BaseHMM):
         err_msg = ("Input must be a list of non-negative integer arrays, \
                    but %s was given.")
 
-        if not self._check_input_symbols(obs):
-            raise ValueError(err_msg % obs)
+        modelBroadcast = sc.broadcast(self)
 
-        return super(PoissonHMM, self).fit(sc, obs)
+        if not data.map(lambda x: modelBroadcast.value._check_input_symbols(x)).min():
+            raise ValueError(err_msg % data.take(5))
+
+        return super(PoissonHMM, self).fit(sc, data)
 
 
 class ExponentialHMM(_BaseHMM):
@@ -1593,7 +1598,10 @@ class ExponentialHMM(_BaseHMM):
     def _init(self, obs, params='str'):
         super(ExponentialHMM, self)._init(obs, params=params)
 
-        concat_obs = np.concatenate(obs)
+        concat_obs = np.array(obs
+                              .flatMap(identity)
+                              .sample(False, 0.01)
+                              .collect())
         if 'r' in params:
             clu = cluster.KMeans(n_clusters=self.n_states).fit(
                 np.atleast_2d(concat_obs).T)
@@ -1630,7 +1638,7 @@ class ExponentialHMM(_BaseHMM):
         e.g. x = [0., 0.5, 2.3] is OK and y = [0.0, -1.0, 3.3, 5.4, 10.9] not
         """
 
-        symbols = np.concatenate(obs)
+        symbols = obs.copy()
         if symbols.dtype.kind not in ('f', 'i'):
             # input symbols must be integer
             return False
@@ -1650,7 +1658,7 @@ class ExponentialHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, sc, obs):
+    def fit(self, sc, data):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1677,10 +1685,12 @@ class ExponentialHMM(_BaseHMM):
         err_msg = ("Input must be a list of non-negative real arrays, \
                    but %s was given.")
 
-        if not self._check_input_symbols(obs):
-            raise ValueError(err_msg % obs)
+        modelBroadcast = sc.broadcast(self)
 
-        return super(ExponentialHMM, self).fit(sc, obs)
+        if not data.map(lambda x: modelBroadcast.value._check_input_symbols(x)).min():
+            raise ValueError(err_msg % data.take(5))
+
+        return super(ExponentialHMM, self).fit(sc, data)
 
 
 class MultinomialExponentialHMM(_BaseHMM):
@@ -2073,7 +2083,11 @@ class GMMHMM(_BaseHMM):
     def _init(self, obs, params='stwmc'):
         super(GMMHMM, self)._init(obs, params=params)
 
-        concat_obs = np.concatenate(obs, 0)
+        concat_obs = np.vstack(obs
+                               .flatMap(lambda x: x)
+                               .sample(False, 0.01)
+                               .map(np.atleast_2d)
+                               .collect())
         n_features = concat_obs.shape[1]
 
         for g in self.gmms_:
