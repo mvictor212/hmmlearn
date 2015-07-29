@@ -336,7 +336,7 @@ class _BaseMixHMM(BaseEstimator):
 
         return np.array(components), obs, states
 
-    def fit(self, obs, warm_start=True):
+    def fit(self, obs, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -369,6 +369,7 @@ class _BaseMixHMM(BaseEstimator):
 
         if not warm_start:
             self._init(obs, self.init_params)
+        print warm_start
 
         if self.verbose:
             verbose_reporter = VerboseReporter(self.verbose)
@@ -765,7 +766,7 @@ class MultinomialMixHMM(_BaseMixHMM):
                 (self.hmms[0].n_states * (self.hmms[0].n_symbols - 1))
         return n_pars
 
-    def fit(self, obs, **kwargs):
+    def fit(self, obs, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -786,7 +787,7 @@ class MultinomialMixHMM(_BaseMixHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseMixHMM.fit(self, obs, **kwargs)
+        return _BaseMixHMM.fit(self, obs, warm_start, **kwargs)
 
 
 class MultinomialExponentialMixHMM(_BaseMixHMM):
