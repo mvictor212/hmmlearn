@@ -369,7 +369,6 @@ class _BaseMixHMM(BaseEstimator):
 
         if not warm_start:
             self._init(obs, self.init_params)
-        print warm_start
 
         if self.verbose:
             verbose_reporter = VerboseReporter(self.verbose)
@@ -1017,7 +1016,7 @@ class MultinomialExponentialMixHMM(_BaseMixHMM):
             n_pars -= (self.n_components - 1) * self.hmms[0].n_states
         return n_pars
 
-    def fit(self, obs, **kwargs):
+    def fit(self, obs, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1040,7 +1039,7 @@ class MultinomialExponentialMixHMM(_BaseMixHMM):
         if not self._check_input_symbols(cleaned_obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseMixHMM.fit(self, cleaned_obs, **kwargs)
+        return _BaseMixHMM.fit(self, cleaned_obs, warm_start, **kwargs)
 
 
 class PoissonMixHMM(_BaseMixHMM):
@@ -1243,7 +1242,7 @@ class PoissonMixHMM(_BaseMixHMM):
             n_pars -= (self.n_components - 1) * self.hmms[0].n_states
         return n_pars
 
-    def fit(self, obs, **kwargs):
+    def fit(self, obs, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1263,7 +1262,7 @@ class PoissonMixHMM(_BaseMixHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseMixHMM.fit(self, obs, **kwargs)
+        return _BaseMixHMM.fit(self, obs, warm_start, **kwargs)
 
 
 class ExponentialMixHMM(_BaseMixHMM):
@@ -1467,7 +1466,7 @@ class ExponentialMixHMM(_BaseMixHMM):
             n_pars -= (self.n_components - 1) * self.hmms[0].n_states
         return n_pars
 
-    def fit(self, obs, **kwargs):
+    def fit(self, obs, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1487,7 +1486,7 @@ class ExponentialMixHMM(_BaseMixHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseMixHMM.fit(self, obs, **kwargs)
+        return _BaseMixHMM.fit(self, obs, warm_start, **kwargs)
 
 
 class GaussianMixHMM(_BaseMixHMM):
@@ -1690,7 +1689,7 @@ class GaussianMixHMM(_BaseMixHMM):
                         additional_stats['hmm_stats'][k]['obs*obs.T']
         return stats
 
-    def fit(self, obs, **kwargs):
+    def fit(self, obs, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1704,7 +1703,7 @@ class GaussianMixHMM(_BaseMixHMM):
             has shape (n_i, n_features), where n_i is the length of
             the i_th observation.
         """
-        return _BaseMixHMM.fit(self, obs, **kwargs)
+        return _BaseMixHMM.fit(self, obs, warm_start, **kwargs)
 
     def _n_free_parameters(self):
         n_pars = self.n_components - 1

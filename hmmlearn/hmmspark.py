@@ -561,7 +561,7 @@ class _BaseHMM(BaseEstimator):
 
         return obs, states
 
-    def fit(self, sc, data, warm_start=True):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1053,7 +1053,7 @@ class GaussianHMM(_BaseHMM):
                                        * self.n_features) / 2
         return n_pars
 
-    def fit(self, sc, obs):
+    def fit(self, sc, obs, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1077,7 +1077,7 @@ class GaussianHMM(_BaseHMM):
         more components becomminging too small).  You can fix this by getting
         more training data, or increasing covars_prior.
         """
-        return super(GaussianHMM, self).fit(sc, obs)
+        return super(GaussianHMM, self).fit(sc, obs, warm_start)
 
 
 class MultinomialHMM(_BaseHMM):
@@ -1262,7 +1262,7 @@ class MultinomialHMM(_BaseHMM):
         n_pars += self.n_states * (self.n_symbols - 1)
         return n_pars
 
-    def fit(self, sc, data, **kwargs):
+    def fit(self, sc, data, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1289,7 +1289,7 @@ class MultinomialHMM(_BaseHMM):
         elif np.any(np.diff(data.flatMap(identity).distinct().sortBy(identity).collect()) > 1):
             raise ValueError(err_msg % data.take(5))
 
-        return _BaseHMM.fit(self, sc, data, **kwargs)
+        return _BaseHMM.fit(self, sc, data, warm_start, **kwargs)
 
 
 class PoissonHMM(_BaseHMM):
@@ -1448,7 +1448,7 @@ class PoissonHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, sc, data):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1480,7 +1480,7 @@ class PoissonHMM(_BaseHMM):
         if not data.map(lambda x: modelBroadcast.value._check_input_symbols(x)).min():
             raise ValueError(err_msg % data.take(5))
 
-        return super(PoissonHMM, self).fit(sc, data)
+        return super(PoissonHMM, self).fit(sc, data, warm_start)
 
 
 class ExponentialHMM(_BaseHMM):
@@ -1643,7 +1643,7 @@ class ExponentialHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, sc, data):
+    def fit(self, sc, data, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1675,7 +1675,7 @@ class ExponentialHMM(_BaseHMM):
         if not data.map(lambda x: modelBroadcast.value._check_input_symbols(x)).min():
             raise ValueError(err_msg % data.take(5))
 
-        return super(ExponentialHMM, self).fit(sc, data)
+        return super(ExponentialHMM, self).fit(sc, data, warm_start)
 
 
 class MultinomialExponentialHMM(_BaseHMM):
@@ -1911,7 +1911,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, sc, data, **kwargs):
+    def fit(self, sc, data, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1940,7 +1940,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         elif np.any(np.diff(cleaned_data.flatMap(lambda seq: seq[:, 0]).distinct().sortBy(identity).collect()) > 1):
             raise ValueError(err_msg % cleaned_data.take(5))
 
-        return _BaseHMM.fit(self, sc, cleaned_data, **kwargs)
+        return _BaseHMM.fit(self, sc, cleaned_data, warm_start, **kwargs)
 
 
 class GMMHMM(_BaseHMM):

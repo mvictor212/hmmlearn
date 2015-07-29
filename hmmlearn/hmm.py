@@ -566,7 +566,7 @@ class _BaseHMM(BaseEstimator):
 
         return obs, states
 
-    def fit(self, obs, warm_start=True):
+    def fit(self, obs, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1116,7 +1116,7 @@ class GaussianHMM(_BaseHMM):
             n_pars += self.n_states * ((self.n_features + 1) * self.n_features) / 2
         return n_pars
 
-    def fit(self, obs):
+    def fit(self, obs, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1140,7 +1140,7 @@ class GaussianHMM(_BaseHMM):
         more components becomminging too small).  You can fix this by getting
         more training data, or increasing covars_prior.
         """
-        return super(GaussianHMM, self).fit(obs)
+        return super(GaussianHMM, self).fit(obs, warm_start)
 
 
 class MultinomialHMM(_BaseHMM):
@@ -1345,7 +1345,7 @@ class MultinomialHMM(_BaseHMM):
         n_pars += self.n_states * (self.n_symbols - 1)
         return n_pars
 
-    def fit(self, obs, **kwargs):
+    def fit(self, obs, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1368,7 +1368,7 @@ class MultinomialHMM(_BaseHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseHMM.fit(self, obs, **kwargs)
+        return _BaseHMM.fit(self, obs, warm_start, **kwargs)
 
 
 class PoissonHMM(_BaseHMM):
@@ -1550,7 +1550,7 @@ class PoissonHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, obs):
+    def fit(self, obs, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1580,7 +1580,7 @@ class PoissonHMM(_BaseHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return super(PoissonHMM, self).fit(obs)
+        return super(PoissonHMM, self).fit(obs, warm_start)
 
 
 class ExponentialHMM(_BaseHMM):
@@ -1763,7 +1763,7 @@ class ExponentialHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, obs):
+    def fit(self, obs, warm_start=False):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -1793,7 +1793,7 @@ class ExponentialHMM(_BaseHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return super(ExponentialHMM, self).fit(obs)
+        return super(ExponentialHMM, self).fit(obs, warm_start)
 
 
 class MultinomialExponentialHMM(_BaseHMM):
@@ -2062,7 +2062,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         n_pars += self.n_states
         return n_pars
 
-    def fit(self, obs, **kwargs):
+    def fit(self, obs, warm_start=False, **kwargs):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -2087,7 +2087,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         if not self._check_input_symbols(cleaned_obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseHMM.fit(self, cleaned_obs, **kwargs)
+        return _BaseHMM.fit(self, cleaned_obs, warm_start, **kwargs)
 
 
 class GMMHMM(_BaseHMM):
