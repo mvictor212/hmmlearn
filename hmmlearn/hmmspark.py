@@ -561,7 +561,7 @@ class _BaseHMM(BaseEstimator):
 
         return obs, states
 
-    def fit(self, sc, data):
+    def fit(self, sc, data, warm_start=True):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -590,7 +590,8 @@ class _BaseHMM(BaseEstimator):
         if self.algorithm not in decoder_algorithms:
             self._algorithm = "viterbi"
 
-        self._init(data, self.init_params)
+        if not warm_start:
+            self._init(data, self.init_params)
 
         if self.verbose:
             verbose_reporter = VerboseReporter(self.verbose)

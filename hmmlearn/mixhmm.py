@@ -336,7 +336,7 @@ class _BaseMixHMM(BaseEstimator):
 
         return np.array(components), obs, states
 
-    def fit(self, obs):
+    def fit(self, obs, warm_start=True):
         """Estimate model parameters.
 
         An initialization step is performed before entering the EM
@@ -367,7 +367,8 @@ class _BaseMixHMM(BaseEstimator):
         n_batches = (len(obs) // self.batch_size) + \
             (1 if len(obs) % self.batch_size else 0)
 
-        self._init(obs, self.init_params)
+        if not warm_start:
+            self._init(obs, self.init_params)
 
         if self.verbose:
             verbose_reporter = VerboseReporter(self.verbose)
