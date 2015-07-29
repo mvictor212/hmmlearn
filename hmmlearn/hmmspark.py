@@ -1289,7 +1289,7 @@ class MultinomialHMM(_BaseHMM):
         elif np.any(np.diff(data.flatMap(identity).distinct().sortBy(identity).collect()) > 1):
             raise ValueError(err_msg % data.take(5))
 
-        return _BaseHMM.fit(self, sc, data, warm_start, **kwargs)
+        return super(MultinomialHMM, self).fit(sc, data, warm_start, **kwargs)
 
 
 class PoissonHMM(_BaseHMM):
@@ -1940,7 +1940,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         elif np.any(np.diff(cleaned_data.flatMap(lambda seq: seq[:, 0]).distinct().sortBy(identity).collect()) > 1):
             raise ValueError(err_msg % cleaned_data.take(5))
 
-        return _BaseHMM.fit(self, sc, cleaned_data, warm_start, **kwargs)
+        return super(MultinomialExponentialHMM, self).fit(sc, cleaned_data, warm_start, **kwargs)
 
 
 class GMMHMM(_BaseHMM):

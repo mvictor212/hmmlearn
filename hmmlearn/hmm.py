@@ -1368,7 +1368,7 @@ class MultinomialHMM(_BaseHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseHMM.fit(self, obs, warm_start, **kwargs)
+        return super(MultinomialHMM, self).fit(obs, warm_start, **kwargs)
 
 
 class PoissonHMM(_BaseHMM):
@@ -2087,7 +2087,7 @@ class MultinomialExponentialHMM(_BaseHMM):
         if not self._check_input_symbols(cleaned_obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseHMM.fit(self, cleaned_obs, warm_start, **kwargs)
+        return super(MultinomialExponentialHMM, self).fit(cleaned_obs, warm_start, **kwargs)
 
 
 class GMMHMM(_BaseHMM):

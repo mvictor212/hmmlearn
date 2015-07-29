@@ -786,7 +786,7 @@ class MultinomialMixHMM(_BaseMixHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseMixHMM.fit(self, obs, warm_start, **kwargs)
+        return super(MultinomialMixHMM, self).fit(obs, warm_start, **kwargs)
 
 
 class MultinomialExponentialMixHMM(_BaseMixHMM):
@@ -1039,7 +1039,7 @@ class MultinomialExponentialMixHMM(_BaseMixHMM):
         if not self._check_input_symbols(cleaned_obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseMixHMM.fit(self, cleaned_obs, warm_start, **kwargs)
+        return super(MultinomialExponentialMixHMM, self).fit(cleaned_obs, warm_start, **kwargs)
 
 
 class PoissonMixHMM(_BaseMixHMM):
@@ -1262,7 +1262,7 @@ class PoissonMixHMM(_BaseMixHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseMixHMM.fit(self, obs, warm_start, **kwargs)
+        return super(PoissonMixHMM, self).fit(obs, warm_start, **kwargs)
 
 
 class ExponentialMixHMM(_BaseMixHMM):
@@ -1486,7 +1486,7 @@ class ExponentialMixHMM(_BaseMixHMM):
         if not self._check_input_symbols(obs):
             raise ValueError(err_msg % obs)
 
-        return _BaseMixHMM.fit(self, obs, warm_start, **kwargs)
+        return super(ExponentialMixHMM, self).fit(obs, warm_start, **kwargs)
 
 
 class GaussianMixHMM(_BaseMixHMM):
@@ -1703,7 +1703,7 @@ class GaussianMixHMM(_BaseMixHMM):
             has shape (n_i, n_features), where n_i is the length of
             the i_th observation.
         """
-        return _BaseMixHMM.fit(self, obs, warm_start, **kwargs)
+        return super(GaussianMixHMM, self).fit(obs, warm_start, **kwargs)
 
     def _n_free_parameters(self):
         n_pars = self.n_components - 1
